@@ -11,6 +11,6 @@ python dataset/make_dataset.py \
     --simple_prob 0.3 \
     --min_dims 1 \
     --max_dims 2 \
-    --seed 4678045
+    --seed 1916161
     # --make_lmdb \
     # --lmdb_out /home/syk/pest_cls_dataset/captions/multimodal.lmdb \

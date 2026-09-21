@@ -144,6 +144,7 @@ class EpochEvalCallback(pl.Callback):
 
             is_best = (winner_score > owner.best_metric) if mode == "max" else (winner_score < owner.best_metric)
             if is_best:
+                _log.info("保存 best.safetensors")
                 owner.best_metric = winner_score
                 owner.best_epoch = actual_epoch
                 owner.best_source = winner_source
@@ -159,6 +160,7 @@ class EpochEvalCallback(pl.Callback):
 
             si = cfg.train.save_interval
             if si and (actual_epoch + 1) % si == 0:
+                _log.info(f"保存 checkpoint-{actual_epoch}.safetensors")
                 owner.model.save_safetensors(
                     str(owner.out / f"checkpoint-{actual_epoch}.safetensors"),
                     epoch=actual_epoch, metric=reg_score, save_optimizer=True, train_config=tc

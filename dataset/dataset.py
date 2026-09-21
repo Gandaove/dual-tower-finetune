@@ -250,15 +250,13 @@ class DualTowerDataModule(LightningDataModule):
             raise ValueError(f"class_map_csv 必须包含以下列: {required_cols}")
 
         cnames, latins = [], []
-        # 去重并保持顺序稳定
-        seen = set()
-        for _, row in df.iterrows():
+        for idx, row in df.iterrows():
             cname = str(row["pest_cname"]).strip()
             latin = str(row["pest_latin_name"]).strip()
-            if cname and latin and cname not in seen and cname.lower() != "nan":
-                seen.add(cname)
-                cnames.append(cname)
-                latins.append(latin)
+            if not cname or not latin or cname.lower() == "nan" or latin.lower() == "nan":
+                raise ValueError(f"class_map_csv 第 {idx + 2} 行存在空值或非法 'nan': cname='{cname}', latin='{latin}'")
+            cnames.append(cname)
+            latins.append(latin)
 
         return cnames, latins
 

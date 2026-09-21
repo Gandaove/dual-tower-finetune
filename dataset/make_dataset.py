@@ -121,11 +121,13 @@ class CaptionGenerator:
         num_dim_range: Tuple[int, int] = (3, 4),
         contrast_prob: float = 0.5,
         simple_prob: float = 0.3,   # 极简模板分支概率
+        prompt_prefix: str = "A photo of a"
     ):
         self.kb_loader = kb_loader
         self.num_dim_range = num_dim_range
         self.contrast_prob = contrast_prob
         self.simple_prob = simple_prob
+        self.prompt_prefix = prompt_prefix
 
     def _sanitize_contrast(self, phrase: str, target_species: str) -> str:
         """基于全局词表安全替换本物种与竞争物种实体，保留原始句式结构。"""
@@ -152,10 +154,10 @@ class CaptionGenerator:
     def _sample_single(self, latin_name: str) -> str:
         info = self.kb_loader.get(latin_name)
         if not info or random.random() < self.simple_prob:
-            return f"A photo of {latin_name}."
+            return f"{self.prompt_prefix} {latin_name}."
 
         taxon = info.get("taxon_group", "").strip()
-        prefix = f"A photo of {latin_name}, belonging to {taxon}." if taxon else f"A photo of {latin_name}."
+        prefix = f"{self.prompt_prefix} {latin_name}, belonging to {taxon}." if taxon else f"{self.prompt_prefix} {latin_name}."
 
         dims = info.get("dimensions", {})
         available_dims = [k for k, v in dims.items() if v]
@@ -268,6 +270,7 @@ class DatasetPipeline:
             num_dim_range=(args.min_dims, args.max_dims),
             contrast_prob=args.contrast_prob,
             simple_prob=args.simple_prob,
+            prompt_prefix=args.prompt_prefix
         )
         self.splitter = DatasetSplitter(ratios=args.ratios, seed=args.seed)
 
@@ -353,6 +356,7 @@ def main():
     parser.add_argument("--simple_prob", type=float, default=0.3, help="输出极简模板的概率")
     parser.add_argument("--min_dims", type=int, default=3, help="采样属性维度的最小数量")
     parser.add_argument("--max_dims", type=int, default=4, help="采样属性维度的最大数量")
+    parser.add_argument("--prompt_prefix", type=str, default="A photo of a", help="caption通用前缀")
     parser.add_argument("--make_lmdb", action="store_true", help="是否同时写入单文件 LMDB")
     parser.add_argument("--lmdb_out", default=None, help="LMDB 单文件保存路径 (默认: out_dir/images.lmdb)")
     parser.add_argument("--seed", type=int, default=42, help="划分随机种子")

@@ -154,7 +154,7 @@ class Evaluator:
                     logits = ie_norm @ proto.t()  # [B, C]
                     preds = logits.argmax(dim=-1).cpu().numpy().tolist()
                     y_pred_list.extend(preds)
-                    y_true_list.extend([cname_to_idx.get(lbl, -1) for lbl in batch["label"]])
+                    y_true_list.extend([cname_to_idx.get(lbl) for lbl in batch["label"]])
 
                 if collected_retrieval < self.max_retrieval_samples:
                     remain = self.max_retrieval_samples - collected_retrieval

@@ -502,14 +502,13 @@ class DualTowerExporter:
             if not required_cols.issubset(df.columns):
                 raise ValueError(f"class_map_csv 缺失必要列: {required_cols}")
 
-            seen = set()
             latins = []
-            for _, row in df.iterrows():
+            for idx, row in df.iterrows():
                 cname = str(row["pest_cname"]).strip()
                 latin = str(row["pest_latin_name"]).strip()
-                if cname and latin and cname not in seen and cname.lower() != "nan":
-                    seen.add(cname)
-                    latins.append(latin)
+                if not cname or not latin or cname.lower() == "nan" or latin.lower() == "nan":
+                    raise ValueError(f"class_map_csv 第 {idx + 2} 行存在空值或非法 'nan': cname='{cname}', latin='{latin}'")
+                latins.append(latin)
 
             tmpl = self.model_cfg.eval.prompt_template or "{}"
             return [tmpl.format(l) for l in latins]

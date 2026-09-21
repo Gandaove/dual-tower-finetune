@@ -5,24 +5,24 @@
 # 运行期参数(batch_size/epochs/freeze_mode...)由 CLI 传入。
 # ============================================================
 
-arch: fgclip2                                              # ["siglip2", "tipsv2", "fgclip2"]
-# pretrained_path: "./huggingface_models/tipsv2-b14"
+arch: tipsv2                                              # ["siglip2", "tipsv2", "fgclip2"]
+pretrained_path: "./huggingface_models/tipsv2-b14"
 # pretrained_path: "./huggingface_models/siglip2-base-224"
-pretrained_path: "./huggingface_models/fg-clip2-base"
+# pretrained_path: "./huggingface_models/fg-clip2-base"
 trust_remote_code: true                                  # [siglip: t/f; tipsv2/fgclip2: t]
 
-max_text_length: 196                                     # [64, {...}, 196]
+max_text_length: 64                                     # [64, {...}, 196]
 text_padding: max_length                                 # [max_length, longest, false]
 
 # ------------------------- 优化器 ---------------------------
-lr: 0.0006                                                 # 峰值学习率(warmup 结束后的起点)
+lr: 0.0005                                                 # 峰值学习率(warmup 结束后的起点)
 min_lr: 0.00000001                                          # 余弦/线性退火的下界
 optimizer:
   enable: AdamW                                              # ["AdamW", "MuSGD"]
   weight_decay: 0.001
   betas: [0.9, 0.999]
   eps: 0.00000001
-  layer_decay: 0.72                                          # LLRD 逐层学习率衰减; null 或 1.0 关闭
+  layer_decay: 0.7                                          # LLRD 逐层学习率衰减; null 或 1.0 关闭
   head_lr_scale: 2.5                                        # logit_scale/logit_bias/投影头的 lr 放大倍数
   musgd:                                                     # enable=MuSGD 时生效
     use_muon: true
@@ -51,13 +51,13 @@ amp: bf16                                                    # ["bf16", "fp16", 
 dropout: 0.0                                                # 注入 encoder 的 dropout 正则
 ema: 0.999                                                      # 指数滑动平均衰减; 为 1 时不启用
 grad_clip: 3.0                                               # 梯度裁剪范数; null 关闭
-label_smoothing: 0.0                                         # 仅对 InfoNCE 类损失生效
+label_smoothing: 0.02                                         # 仅对 InfoNCE 类损失生效
 compile: false                                               # torch.compile 加速开关
 
 # ------------------------- 损失 -----------------------------
 loss:
-  name: siglip                                                 # ["auto","siglip","tipsv2","infonce"]; auto 跟随 arch
-  tips_global: sigmoid                                       # ["infonce", "sigmoid"]
+  name: tipsv2                                                 # ["auto","siglip","tipsv2","infonce"]; auto 跟随 arch
+  tips_global: infonce                                       # ["infonce", "sigmoid"]
   learnable_logit: true                                      # logit_scale / logit_bias 是否可学习
   max_scale: 200
   label_constrain: false                                      # 启用 label 约束
@@ -74,8 +74,8 @@ lora:
   bias: lora_only                                                 # ["none", "all", "lora_only"]
   apply_to: ["vision"]                                       # 注入哪些塔: vision / text
   target_modules:
-    # ["qkv", "attn.proj", "fc1", "fc2", "out_proj", "c_fc", "c_proj"]    # tipsv2
-    ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2]
+    ["qkv", "attn.proj", "fc1", "fc2", "out_proj", "c_fc", "c_proj"]    # tipsv2
+    # ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2]
 
 # ------------------------- 验证/评估 ------------------------
 eval:
@@ -83,5 +83,5 @@ eval:
   save_metric_mode: "max"                                     # ["max", "min"]
   retrieval_topk: [1, 5]
   zeroshot: true                                              # 开启闭集零样本分类 + 混淆矩阵
-  prompt_template: "a photo of {}."                          # 类名 -> 文本提示
+  prompt_template: "a photo of a {}."                          # 类名 -> 文本提示
   batch_size: null                                            # null 则复用训练 batch_size
