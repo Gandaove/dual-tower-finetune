@@ -1,0 +1,87 @@
+# ============================================================
+# 模型 / 优化器 / LoRA 配置
+# 对应 dataclass: utils.config.ModelConfig
+# 本文件只描述 "模型与优化行为"，与数据无关；
+# 运行期参数(batch_size/epochs/freeze_mode...)由 CLI 传入。
+# ============================================================
+
+arch: fgclip2                                              # ["siglip2", "tipsv2", "fgclip2"]
+# pretrained_path: "./huggingface_models/tipsv2-b14"
+# pretrained_path: "./huggingface_models/siglip2-base-224"
+pretrained_path: "./huggingface_models/fg-clip2-base"
+trust_remote_code: true                                  # [siglip: t/f; tipsv2/fgclip2: t]
+
+max_text_length: 196                                     # [64, {...}, 196]
+text_padding: max_length                                 # [max_length, longest, false]
+
+# ------------------------- 优化器 ---------------------------
+lr: 0.0006                                                 # 峰值学习率(warmup 结束后的起点)
+min_lr: 0.00000001                                          # 余弦/线性退火的下界
+optimizer:
+  enable: AdamW                                              # ["AdamW", "MuSGD"]
+  weight_decay: 0.001
+  betas: [0.9, 0.999]
+  eps: 0.00000001
+  layer_decay: 0.72                                          # LLRD 逐层学习率衰减; null 或 1.0 关闭
+  head_lr_scale: 2.5                                        # logit_scale/logit_bias/投影头的 lr 放大倍数
+  musgd:                                                     # enable=MuSGD 时生效
+    use_muon: true
+    muon_weight: 0.5                                         # Muon(正交化)分支权重
+    sgd_weight: 0.5                                          # SGD(动量)分支权重
+    momentum: 0.95
+    nesterov: true
+    ns_steps: 5                                              # Newton-Schulz 迭代步数
+
+# ------------------------- 调度器 ---------------------------
+scheduler:
+  enable: cosine                                             # ["linear", "cosine", "onecycle", "multistep"]
+  warmup_epochs: 8                                          
+  warmup_start_factor: 0.1                                  # warmup 起始 lr = lr * factor
+  interval: step                                             # ["step", "epoch"] 调度粒度
+  multistep:
+    milestones: [10, 20]                                     # 单位: epoch
+    gamma: 0.1
+  onecycle:
+    pct_start: 0.1
+    div_factor: 25.0
+    final_div_factor: 10000.0
+
+# ------------------------- 训练 -------------------------
+amp: bf16                                                    # ["bf16", "fp16", false]
+dropout: 0.0                                                # 注入 encoder 的 dropout 正则
+ema: 0.999                                                      # 指数滑动平均衰减; 为 1 时不启用
+grad_clip: 3.0                                               # 梯度裁剪范数; null 关闭
+label_smoothing: 0.0                                         # 仅对 InfoNCE 类损失生效
+compile: false                                               # torch.compile 加速开关
+
+# ------------------------- 损失 -----------------------------
+loss:
+  name: siglip                                                 # ["auto","siglip","tipsv2","infonce"]; auto 跟随 arch
+  tips_global: sigmoid                                       # ["infonce", "sigmoid"]
+  learnable_logit: true                                      # logit_scale / logit_bias 是否可学习
+  max_scale: 200
+  label_constrain: false                                      # 启用 label 约束
+  init_scale: auto                                           # ["auto", {float}]; auto 优先读取主干预训练权重
+  init_bias: auto
+
+# ------------------------- LoRA -----------------------------
+use_lora: true
+lora:
+  type: "dora"                                               # ["lora", "dora", "loha", "lokr"]
+  r: 64
+  alpha: 128
+  dropout: 0.08
+  bias: lora_only                                                 # ["none", "all", "lora_only"]
+  apply_to: ["vision"]                                       # 注入哪些塔: vision / text
+  target_modules:
+    # ["qkv", "attn.proj", "fc1", "fc2", "out_proj", "c_fc", "c_proj"]    # tipsv2
+    ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2]
+
+# ------------------------- 验证/评估 ------------------------
+eval:
+  save_metric: "zeroshot_f1"                                  # 用于挑选 best 的指标名(由 Evaluator 产出)
+  save_metric_mode: "max"                                     # ["max", "min"]
+  retrieval_topk: [1, 5]
+  zeroshot: true                                              # 开启闭集零样本分类 + 混淆矩阵
+  prompt_template: "a photo of {}."                          # 类名 -> 文本提示
+  batch_size: null                                            # null 则复用训练 batch_size

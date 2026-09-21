@@ -1,0 +1,56 @@
+# ============================================================
+# 数据配置
+# 对应 dataclass: utils.config.DataConfig
+# 语料 JSON 结构: {"relative/image/path.jpg": ["caption1", "caption2"]}
+# ============================================================
+
+root: /home/syk/pest_cls_dataset            # 数据集根目录
+images: captions/multimodal.lmdb                       
+train: captions/train.json         # 相对 root
+val: captions/valid.json
+class_map_csv: captions/pest_filted.csv         # 包含[pest_name, pest_cname, pest_latin_name]
+
+caption_sample: random                      # caption 采样策略: ["random", "first", "concat"]
+val_caption_sample: first                   # 验证集固定取首条, 保证指标可复现
+
+augment:
+  enabled: true
+  close_augment_epoch: 25                  # 该 epoch 起关闭增强(仅保留 resize/normalize)
+  resize:
+    method: "letterbox"                     # ["shortest_edge", "letterbox", "direct"]
+    size: 224                            # tipsv2: 448 / siglip2: 224
+    interp: "bilinear"                      # ["bilinear", "bicubic", "nearest"]
+    pad_value: 114                          # letterbox 填充灰度
+  crop:
+    enabled: false
+    method: "center"                        # ["center", "random"]
+    size: 224
+  flip: 0.5                                 # 水平/垂直翻转概率
+  vflip: 0.5                                # 单独控制垂直翻转; >0 时覆盖 flip 的垂直分量
+  rotate:
+    limit: [-10, 10]
+    prob: 0.2
+  affine:
+    percent: 0.12                           # 平移比例
+    scale: [0.9, 1.1]
+    shear: 10
+    prob: 0.35
+  perspective:
+    scale: [0.0005, 0.001]
+    prob: 0.15
+  hsv:
+    h: 0.015
+    s: 0.5
+    v: 0.4
+    prob: 0.25
+  gauss_blur:
+    blur: [3, 5]
+    sigma: [0.3, 1]
+    prob: 0.2
+  erase:
+    prob: 0.4
+    range: [0.01, 0.04]
+    max_holes: 4
+  normalize:
+    mean: [0.5, 0.5, 0.5]         # tipsv2: 0 / siglip2: 0.5
+    std: [0.5, 0.5, 0.5]          # tipsv2: 1 / siglip2: 0.5
