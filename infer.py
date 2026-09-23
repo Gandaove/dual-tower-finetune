@@ -166,13 +166,13 @@ class ZeroShotImageClassifier:
                 raise FileNotFoundError(f"未找到物种映射表 class_map_csv: {csv_path}")
 
             df = pd.read_csv(csv_path)
-            required_cols = {"pest_cname", "pest_latin_name"}
+            required_cols = {"alias", "pest_latin_name"}
             if not required_cols.issubset(df.columns):
                 raise ValueError(f"class_map_csv 缺失必要列: {required_cols}")
 
             cnames, latins = [], []
             for idx, row in df.iterrows():
-                cname = str(row["pest_cname"]).strip()
+                cname = str(row["alias"]).strip()
                 latin = str(row["pest_latin_name"]).strip()
                 if not cname or not latin or cname.lower() == "nan" or latin.lower() == "nan":
                     raise ValueError(f"class_map_csv 第 {idx + 2} 行存在空值或非法 'nan': cname='{cname}', latin='{latin}'")

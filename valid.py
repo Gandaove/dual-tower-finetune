@@ -111,7 +111,7 @@ class StandaloneValidator:
         dm.setup("validate")
 
         cfg = Config(model=self.model_cfg, data=self.data_cfg, train=self.train_cfg)
-        model = build_dual_tower_model(cfg, classes=dm.cname_classes, transform=dm.transform)
+        model = build_dual_tower_model(cfg, classes=dm.taxonomy.cnames, transform=dm.transform)
 
         # 防御性断言：确保无任何 LoRA/PEFT 包装类漏网
         for module in model.modules():
@@ -127,8 +127,7 @@ class StandaloneValidator:
         evaluator = Evaluator(
             model=model,
             model_cfg=self.model_cfg,
-            cname_classes=dm.cname_classes,
-            latin_classes=dm.latin_classes,
+            taxonomy=dm.taxonomy,
             device=self.device,
         )
 
@@ -149,8 +148,12 @@ class StandaloneValidator:
 
         if evaluator.last_confusion is not None:
             cm_path = self.output_dir / "confusion_matrix.png"
-            Evaluator.save_confusion_png(evaluator.last_confusion, str(cm_path))
-            _log.info(f"[Export] 混淆矩阵已保存: {cm_path}")
+            Evaluator.save_confusion_png(
+                evaluator.last_confusion, 
+                str(cm_path),
+                best_f1=metrics.get("zeroshot_f1", None)
+            )
+            _log.info(f"[Export] 混淆矩阵已保存")
 
         return metrics
 

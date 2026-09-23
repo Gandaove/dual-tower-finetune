@@ -5,13 +5,13 @@
 # 运行期参数(batch_size/epochs/freeze_mode...)由 CLI 传入。
 # ============================================================
 
-arch: tipsv2                                              # ["siglip2", "tipsv2", "fgclip2"]
-pretrained_path: "./huggingface_models/tipsv2-b14"
+arch: fgclip2                                              # ["siglip2", "tipsv2", "fgclip2"]
+# pretrained_path: "./huggingface_models/tipsv2-b14"
 # pretrained_path: "./huggingface_models/siglip2-base-224"
-# pretrained_path: "./huggingface_models/fg-clip2-base"
+pretrained_path: "./huggingface_models/fg-clip2-base"
 trust_remote_code: true                                  # [siglip: t/f; tipsv2/fgclip2: t]
 
-max_text_length: 64                                     # [64, {...}, 196]
+max_text_length: 196                                     # [64, {...}, 196]
 text_padding: max_length                                 # [max_length, longest, false]
 
 # ------------------------- 优化器 ---------------------------
@@ -56,8 +56,8 @@ compile: false                                               # torch.compile 加
 
 # ------------------------- 损失 -----------------------------
 loss:
-  name: tipsv2                                                 # ["auto","siglip","tipsv2","infonce"]; auto 跟随 arch
-  tips_global: infonce                                       # ["infonce", "sigmoid"]
+  name: auto                                                 # ["auto","siglip","tipsv2","infonce"]; auto 跟随 arch
+  tips_global: sigmoid                                       # ["infonce", "sigmoid"]
   learnable_logit: true                                      # logit_scale / logit_bias 是否可学习
   max_scale: 200
   label_constrain: false                                      # 启用 label 约束
@@ -74,8 +74,8 @@ lora:
   bias: lora_only                                                 # ["none", "all", "lora_only"]
   apply_to: ["vision"]                                       # 注入哪些塔: vision / text
   target_modules:
-    ["qkv", "attn.proj", "fc1", "fc2", "out_proj", "c_fc", "c_proj"]    # tipsv2
-    # ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2]
+    # ["qkv", "attn.proj", "fc1", "fc2", "out_proj", "c_fc", "c_proj"]    # tipsv2
+    ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2]
 
 # ------------------------- 验证/评估 ------------------------
 eval:

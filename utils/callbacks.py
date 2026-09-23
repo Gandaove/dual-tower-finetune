@@ -1,15 +1,3 @@
-"""PyTorch Lightning Callbacks(全部集中于此)。
-
-Skill §4.5 / 用户要求: 所有 callback 都应放在 callbacks.py。
-  - MergeCallback: 训练结束时合并 LoRA 并导出 HF 权重目录;
-  - EMACallback: 验证/测试前切换 EMA 权重, 结束后恢复;
-  - MetricsCSVCallback: 每个 epoch 记录 training-metrics.csv;
-  - EpochEvalCallback: 每轮结束后跑完整 Evaluator, 挑选 best 指标, 保存
-        best/last/interval 检查点, 并在连续未提升时早停(早停/Checkpoints/Merge 三件套)。
-
-注意: EpochEvalCallback 通过 owner(Trainer) 获取评估/保存能力, 二者为单向依赖
-(callbacks 不反向 import trainer), 保持解耦。
-"""
 from __future__ import annotations
 
 import csv
@@ -20,6 +8,7 @@ import torch.distributed as dist
 import pytorch_lightning as pl
 
 from utils.logger import get_logger
+from utils.evaluator import Evaluator
 from utils.config import write_set_config
 
 _log = get_logger("callbacks")
@@ -155,8 +144,14 @@ class EpochEvalCallback(pl.Callback):
                     owner.model.save_safetensors(best_path, epoch=actual_epoch, metric=winner_score, save_optimizer=False, train_config=tc)
 
                 if winner_cm is not None:
-                    from utils.evaluator import Evaluator
-                    Evaluator.save_confusion_png(winner_cm, str(owner.out / "best-confusion-matrix.png"), epoch=actual_epoch)
+                    target_metrics = ema_metrics if winner_source == "ema" else reg_metrics
+                    current_best_f1 = target_metrics.get("zeroshot_f1", winner_score)
+                    Evaluator.save_confusion_png(
+                        winner_cm, 
+                        str(owner.out / "best-confusion-matrix.png"), 
+                        epoch=actual_epoch,
+                        best_f1=float(current_best_f1)
+                    )
 
             si = cfg.train.save_interval
             if si and (actual_epoch + 1) % si == 0:

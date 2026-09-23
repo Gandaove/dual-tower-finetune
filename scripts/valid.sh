@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 python valid.py \
-    --ckpt_path    outputs/tipsv2-20260914/merged/tipsv2-20260915.safetensors \
-    --output_dir   outputs/tipsv2-20260914/valid1/ \
+    --ckpt_path    outputs/fgclip2-20260922/merge/fgclip2-20260922.safetensors \
+    --output_dir   outputs/fgclip2-20260922/valid1/ \
     --num_workers 4 \
     "$@"

@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Union
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
-from utils.config import ModelConfig
+from utils.config import ModelConfig, TaxonomyClasses
 from utils.logger import get_logger, progress
 
 _log = get_logger("eval")
@@ -29,8 +29,7 @@ class Evaluator:
         self,
         model,
         model_cfg: ModelConfig,
-        cname_classes: List[str],
-        latin_classes: List[str],
+        taxonomy: TaxonomyClasses,
         device: torch.device, 
         max_retrieval_samples: int = 5000,
 
@@ -38,8 +37,7 @@ class Evaluator:
         self.model = model
         self.model_cfg = model_cfg
         self.eval_cfg = model_cfg.eval
-        self.cname_classes = list(cname_classes)
-        self.latin_classes = list(latin_classes)
+        self.taxonomy = taxonomy
         self.last_confusion: Optional[Tuple[np.ndarray, List[str]]] = None
         self.device = device
         self.max_retrieval_samples = max_retrieval_samples
@@ -62,11 +60,11 @@ class Evaluator:
     @torch.no_grad()
     def _class_prototypes(self, device: torch.device, batch_size: int = 64) -> Optional[torch.Tensor]:
         """构建归一化后的零样本类别原型 [C, D]"""
-        if not self.latin_classes:
+        if not self.taxonomy.latins:
             return None
 
         tmpl = self.eval_cfg.prompt_template
-        prompts = [tmpl.format(latin) for latin in self.latin_classes]
+        prompts = [tmpl.format(latin) for latin in self.taxonomy.latins]
         feats = []
 
         with self.autocast_ctx:
@@ -123,10 +121,10 @@ class Evaluator:
         eval_mod.eval()
 
         proto = cached_proto
-        if self.eval_cfg.zeroshot and self.cname_classes and proto is None:
+        if self.eval_cfg.zeroshot and self.taxonomy.cnames and proto is None:
             proto = self._class_prototypes(self.device)
 
-        cname_to_idx = {name: i for i, name in enumerate(self.cname_classes)}
+        cname_to_idx = self.taxonomy.cname_to_idx
         y_true_list: List[int] = []
         y_pred_list: List[int] = []
 
@@ -137,7 +135,7 @@ class Evaluator:
         val_batches = 0
 
         with self.autocast_ctx:
-            for batch in progress(dataloader, desc=desc, leave=False):
+            for batch in progress(dataloader, desc=desc, leave=True):
                 images = batch["image"].to(self.device)
                 txt_tok = eval_mod.tokenize_text(batch["text"])
                 txt_tok = {k: v.to(self.device) for k, v in txt_tok.items()}
@@ -154,7 +152,7 @@ class Evaluator:
                     logits = ie_norm @ proto.t()  # [B, C]
                     preds = logits.argmax(dim=-1).cpu().numpy().tolist()
                     y_pred_list.extend(preds)
-                    y_true_list.extend([cname_to_idx.get(lbl) for lbl in batch["label"]])
+                    y_true_list.extend([cname_to_idx.get(lbl, -1) for lbl in batch["label"]])       # 兼容负样本 -1
 
                 if collected_retrieval < self.max_retrieval_samples:
                     remain = self.max_retrieval_samples - collected_retrieval
@@ -169,17 +167,23 @@ class Evaluator:
         if y_true_list:
             y_true = np.array(y_true_list, dtype=np.int32)
             y_pred = np.array(y_pred_list, dtype=np.int32)
-            valid_mask = y_true >= 0
 
-            if valid_mask.any():
-                yt_val = y_true[valid_mask]
-                yp_val = y_pred[valid_mask]
-                metrics["zeroshot_f1"] = float(f1_score(yt_val, yp_val, average="macro", zero_division=0))
-                metrics["zeroshot_acc"] = float(accuracy_score(yt_val, yp_val))
-                cm = confusion_matrix(yt_val, yp_val, labels=list(range(len(self.cname_classes))))
-                self.last_confusion = (cm, self.cname_classes)
+            pos_labels = self.taxonomy.pos_indices
+            pos_cnames = self.taxonomy.pos_cnames
 
-        # 安全分块计算跨模态检索指标
+            metrics["zeroshot_f1"] = float(f1_score(
+                y_true, y_pred, labels=pos_labels, average="macro", zero_division=0
+            ))
+
+            pos_mask = np.isin(y_true, pos_labels)
+            if pos_mask.any():
+                metrics["zeroshot_acc"] = float(accuracy_score(y_true[pos_mask], y_pred[pos_mask]))
+
+            cm = confusion_matrix(y_true, y_pred, labels=pos_labels)
+            true_pos_counts = np.array([(y_true == idx).sum() for idx in pos_labels], dtype=np.int64)
+            self.last_confusion = (cm, pos_cnames, true_pos_counts)
+
+        # 分块计算跨模态检索指标
         if retrieval_imgs:
             r_img = torch.cat(retrieval_imgs, dim=0).to(self.device)
             r_txt = torch.cat(retrieval_txts, dim=0).to(self.device)
@@ -189,61 +193,62 @@ class Evaluator:
         return metrics, proto
 
     @staticmethod
-    def save_confusion_png(cm_tuple: Tuple[np.ndarray, List[str]], path: str, epoch: Optional[int] = None):
-        cm, classes = cm_tuple
+    def save_confusion_png(
+        cm_tuple: Tuple[np.ndarray, List[str]], 
+        path: str, 
+        epoch: Optional[int] = None,
+        best_f1: Optional[float] = None
+    ):
+        cm, classes, true_counts = cm_tuple
         n_classes = len(classes)
-        
-        # 1. 规整画布尺寸与自适应字号
+
         cell_size = max(0.4, 12.0 / max(n_classes, 1))
         fig_dim = max(7.0, n_classes * cell_size)
         fig, ax = plt.subplots(figsize=(fig_dim, fig_dim), dpi=150)
 
-        # 2. 计算按行归一化的召回率百分比 (避免除以 0 产生 NaN)
-        row_sums = cm.sum(axis=1, keepdims=True)
+        # 使用该正类真实总样本数做行归一化，正类被分流至负类时，对角线百分比直接体现扣分
+        denom = np.where(true_counts[:, None] == 0, 1, true_counts[:, None])
         with np.errstate(all="ignore"):
-            cm_norm = np.nan_to_num(cm.astype(float) / np.where(row_sums == 0, 1, row_sums))
+            cm_norm = np.nan_to_num(cm.astype(float) / denom)
 
-        # 3. 渲染热力图与颜色条
         im = ax.imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=1.0)
         cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cbar.set_ticks(np.linspace(0, 1, 6))
         cbar.set_ticklabels([f"{int(x * 100)}%" for x in np.linspace(0, 1, 6)])
 
-        # 4. 显式网格线 (对齐单元格边界)
         ax.set_xticks(np.arange(n_classes + 1) - 0.5, minor=True)
         ax.set_yticks(np.arange(n_classes + 1) - 0.5, minor=True)
         ax.grid(which="minor", color="#D0D0D0", linestyle="-", linewidth=0.6)
         ax.tick_params(which="minor", bottom=False, left=False)
 
-        # 5. 坐标轴与文字 45 度旋转对齐
         label_fontsize = max(5, min(9, int(150 / n_classes)))
         ax.set_xticks(np.arange(n_classes))
         ax.set_yticks(np.arange(n_classes))
         ax.set_xticklabels(classes, rotation=45, ha="right", rotation_mode="anchor", fontsize=label_fontsize)
         ax.set_yticklabels(classes, fontsize=label_fontsize)
-        ax.set_xlabel("Predicted Label", fontsize=label_fontsize + 2, fontweight="bold", labelpad=8)
-        ax.set_ylabel("True Label", fontsize=label_fontsize + 2, fontweight="bold", labelpad=8)
+        ax.set_xlabel("Predicted Label (Positives Only)", fontsize=label_fontsize + 2, fontweight="bold", labelpad=8)
+        ax.set_ylabel("True Label (Positives Only)", fontsize=label_fontsize + 2, fontweight="bold", labelpad=8)
 
-        # 6. 格内填充百分比数值 (高亮度底色自动反白)
         text_fontsize = max(4, min(8, int(100 / n_classes)))
-        thresh = 0.5
         for i in range(n_classes):
             for j in range(n_classes):
                 ratio = cm_norm[i, j]
-                text_color = "white" if ratio > thresh else "black"
-                # 仅标注非零预测，避免视觉混乱；对角线强制显示
+                text_color = "white" if ratio > 0.5 else "black"
                 if ratio > 0.0001 or i == j:
-                    ax.text(
-                        j, i, f"{ratio * 100:.1f}%",
-                        ha="center", va="center",
-                        color=text_color, fontsize=text_fontsize,
-                    )
+                    ax.text(j, i, f"{ratio * 100:.1f}%", ha="center", va="center", color=text_color, fontsize=text_fontsize)
 
-        # 7. 标题设定
         title_str = f"Confusion Matrix (Epoch {epoch})" if epoch is not None else "Confusion Matrix"
         ax.set_title(title_str, fontsize=label_fontsize + 4, fontweight="bold", pad=12)
 
         fig.tight_layout()
         fig.savefig(path, bbox_inches="tight")
         plt.close(fig)
-        _log.info(f"[Eval] 混淆矩阵热力图已保存 -> {path}")
+        
+        if epoch is not None and best_f1 is not None:
+            _log.info(f"[Eval] 混淆矩阵已更新保存 | Epoch: {epoch} | Best-F1: {best_f1:.4f}")
+        elif best_f1 is not None:
+            _log.info(f"[Eval] 混淆矩阵已更新保存 | Best-F1: {best_f1:.4f}")
+        elif epoch is not None:
+            _log.info(f"[Eval] 混淆矩阵已更新保存 | Epoch: {epoch}")
+        else:
+            _log.info(f"[Eval] 混淆矩阵已更新保存")

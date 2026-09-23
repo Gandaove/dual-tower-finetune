@@ -16,7 +16,7 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 
 from dataset.augment import DualTowerTransforms
-from utils.config import DataConfig, TrainConfig
+from utils.config import DataConfig, TrainConfig, TaxonomyClasses
 from utils.logger import get_logger
 
 _log = get_logger("data")
@@ -25,7 +25,7 @@ _log = get_logger("data")
 def load_manifest(path: Union[str, Path]) -> Dict[str, List[str]]:
     """读取包含多条 Caption 的 Manifest JSON 文件。
     
-    格式: {"{pest_cname}+{image_name}": ["caption1", "caption2"]}
+    格式: {"{alias}+{image_name}": ["caption1", "caption2"]}
     """
     p = Path(path)
     if not p.is_file():
@@ -184,7 +184,7 @@ class DualTowerDataset(Dataset):
         pixel_tensor = self.transform(img_rgb, train=use_aug)
 
         caption = self._sample_caption(captions)
-        # 从规范 Key "{pest_cname}+{image_name}" 中剥离中文全拼名作为分类 Ground Truth
+        # 从规范 Key "{alias}+{image_name}" 中剥离中文全拼名作为分类 Ground Truth
         label = key.split("+", 1)[0] if "+" in key else Path(key).parent.name
 
         return {
@@ -216,15 +216,20 @@ class DualTowerDataModule(LightningDataModule):
         self.root = Path(data_cfg.root)
         self.transform = DualTowerTransforms(data_cfg)
 
-        # 核心双轨类别列表
-        self.cname_classes: List[str] = []
-        self.latin_classes: List[str] = []
-        # 向后兼容原 model/evaluator 读取 classes 属性
+        self.taxonomy: Optional[TaxonomyClasses] = None
         self.classes: List[str] = []
 
         self._train_ds: Optional[DualTowerDataset] = None
         self._val_ds: Optional[DualTowerDataset] = None
         self._resolved_images_path: Optional[str] = None
+
+    @property
+    def cname_classes(self) -> List[str]:
+        return self.taxonomy.cnames if self.taxonomy else []
+
+    @property
+    def latin_classes(self) -> List[str]:
+        return self.taxonomy.latins if self.taxonomy else []
 
     def _resolve_images_path(self) -> Optional[str]:
         if not self.cfg.images:
@@ -235,39 +240,17 @@ class DualTowerDataModule(LightningDataModule):
         cand_root = self.root / self.cfg.images
         return str(cand_root)
 
-    def _load_taxonomy_classes(self) -> Tuple[List[str], List[str]]:
-        """从 class_map_csv 解析标准全拼与拉丁学名列表。"""
-        csv_path = Path(self.cfg.class_map_csv)
-        if not csv_path.is_absolute():
-            csv_path = self.root / csv_path
-
-        if not csv_path.is_file():
-            raise FileNotFoundError(f"未找到物种分类表 class_map_csv: {csv_path}")
-
-        df = pd.read_csv(csv_path)
-        required_cols = {"pest_cname", "pest_latin_name"}
-        if not required_cols.issubset(df.columns):
-            raise ValueError(f"class_map_csv 必须包含以下列: {required_cols}")
-
-        cnames, latins = [], []
-        for idx, row in df.iterrows():
-            cname = str(row["pest_cname"]).strip()
-            latin = str(row["pest_latin_name"]).strip()
-            if not cname or not latin or cname.lower() == "nan" or latin.lower() == "nan":
-                raise ValueError(f"class_map_csv 第 {idx + 2} 行存在空值或非法 'nan': cname='{cname}', latin='{latin}'")
-            cnames.append(cname)
-            latins.append(latin)
-
-        return cnames, latins
-
     def setup(self, stage: Optional[str] = None):
         self._resolved_images_path = self._resolve_images_path()
 
-        # 1. 严格从 class_map_csv 建立全量类别映射
-        self.cname_classes, self.latin_classes = self._load_taxonomy_classes()
-        self.classes = self.cname_classes
+        # 解析物种类别映射
+        csv_path = Path(self.cfg.class_map_csv)
+        if not csv_path.is_absolute():
+            csv_path = self.root / csv_path
+        self.taxonomy = TaxonomyClasses.from_csv(csv_path)
+        self.classes = self.taxonomy.cnames
 
-        # 2. 依据阶段路由挂载数据集
+        # 路由挂载数据集
         is_fit = stage in (None, "fit")
         is_eval = stage in (None, "fit", "validate", "test")
 
@@ -296,7 +279,7 @@ class DualTowerDataModule(LightningDataModule):
         train_len = len(self._train_ds) if self._train_ds else 0
         val_len = len(self._val_ds) if self._val_ds else 0
         _log.info(
-            f"[DataModule] 类别基准总数={len(self.cname_classes)} | "
+            f"[DataModule] 类别基准总数={len(self.taxonomy.pos_latins)} | "
             f"train_samples={train_len} | val_samples={val_len} | "
             f"images_mode={'LMDB' if (self._resolved_images_path and self._resolved_images_path.endswith('.lmdb')) else 'Filesystem'}"
         )

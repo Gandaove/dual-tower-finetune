@@ -7,9 +7,9 @@ cd "$(dirname "$0")/.."
 python train.py \
     --model_config configs/model_config.yaml \
     --data_config  configs/data.yaml \
-    --output_dir   ./outputs/tipsv2-20260921 \
+    --output_dir   ./outputs/fgclip2-20260923 \
     --freeze_mode  text \
-    --batch_size   56 \
+    --batch_size   64 \
     --accumulate   4 \
     --epochs       40 \
     --num_workers  6 \

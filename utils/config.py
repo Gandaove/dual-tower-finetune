@@ -11,10 +11,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import dataclasses
-from dataclasses import dataclass, field, fields, is_dataclass
+import pandas as pd
+from dataclasses import dataclass, field, fields, is_dataclass, MISSING as DATACLASS_MISSING
 from pathlib import Path
-from typing import Any, List, Optional, Union, get_args as t_get_args, get_origin
+from typing import Any, List, Optional, Dict, Union, get_args as t_get_args, get_origin
 
 import yaml
 
@@ -185,6 +185,73 @@ class AugmentConfig:
     gauss_blur: AugGaussBlur = field(default_factory=AugGaussBlur)
     erase: AugErase = field(default_factory=AugErase)
     normalize: AugNormalize = field(default_factory=AugNormalize)
+
+
+@dataclass
+class TaxonomyClasses:
+    """物种分类层级映射管理器 (保持 CSV 原始行序)"""
+    cnames: List[str]
+    latins: List[str]
+    is_positive: List[bool]
+
+    @property
+    def total_count(self) -> int:
+        return len(self.cnames)
+
+    @property
+    def pos_indices(self) -> List[int]:
+        """正类索引列表"""
+        return [i for i, pos in enumerate(self.is_positive) if pos]
+
+    @property
+    def neg_indices(self) -> List[int]:
+        """负类索引列表"""
+        return [i for i, pos in enumerate(self.is_positive) if not pos]
+
+    @property
+    def pos_cnames(self) -> List[str]:
+        return [self.cnames[i] for i in self.pos_indices]
+
+    @property
+    def pos_latins(self) -> List[str]:
+        return [self.latins[i] for i in self.pos_indices]
+
+    @property
+    def cname_to_idx(self) -> Dict[str, int]:
+        return {name: i for i, name in enumerate(self.cnames)}
+
+    @property
+    def idx_to_cname(self) -> Dict[int, str]:
+        return {i: name for i, name in enumerate(self.cnames)}
+
+    @classmethod
+    def from_csv(cls, csv_path: Union[str, Path]) -> "TaxonomyClasses":
+        p = Path(csv_path)
+        if not p.is_file():
+            raise FileNotFoundError(f"未找到物种映射表 class_map_csv: {p}")
+
+        df = pd.read_csv(p)
+        required_cols = {"alias", "pest_latin_name", "is_positive"}
+        if not required_cols.issubset(df.columns):
+            raise ValueError(f"class_map_csv 必须包含以下列: {str(required_cols)}")
+
+        cnames: List[str] = []
+        latins: List[str] = []
+        is_pos: List[bool] = []
+
+        for idx, row in df.iterrows():
+            cname = str(row["alias"]).strip()
+            latin = str(row["pest_latin_name"]).strip()
+            pos_flag = int(row["is_positive"]) == 1
+
+            if not cname or not latin or cname.lower() == "nan" or latin.lower() == "nan":
+                raise ValueError(f"第 {idx + 2} 行存在空值或非法 'nan': alias='{cname}', latin='{latin}'")
+
+            cnames.append(cname)
+            latins.append(latin)
+            is_pos.append(pos_flag)
+
+        return cls(cnames=cnames, latins=latins, is_positive=is_pos)
 
 
 @dataclass
@@ -362,9 +429,9 @@ def _build(cls, d: Union[dict, Any]):
         if f.name not in d or d[f.name] is None:
             if f.name in d and d[f.name] is None:
                 kwargs[f.name] = None
-            elif f.default_factory is not dataclasses.MISSING:
+            elif f.default_factory is not DATACLASS_MISSING:
                 kwargs[f.name] = f.default_factory()
-            elif f.default is not dataclasses.MISSING:
+            elif f.default is not DATACLASS_MISSING:
                 kwargs[f.name] = f.default
             else:
                 kwargs[f.name] = None

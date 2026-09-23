@@ -24,7 +24,7 @@ from polygraphy.backend.trt import (
 
 from dataset.augment import DualTowerTransforms
 from models.dual_tower_multimodal import build_dual_tower_model
-from utils.config import Config, DataConfig, ModelConfig, TrainConfig
+from utils.config import Config, DataConfig, ModelConfig, TrainConfig, TaxonomyClasses
 from utils.logger import get_logger
 
 _log = get_logger("export")
@@ -56,6 +56,10 @@ class ModelPatcherRegistry:
 def patch_tipsv2(model: nn.Module, **_):
     """替换 TIPSv2 视觉塔 MemEffAttention 及文本塔残差块原生 Attention 实现"""
     vision_encoder = getattr(model.model, "vision_encoder", None)
+    if vision_encoder and hasattr(vision_encoder, "interpolate_antialias"): # 兼容尺寸
+        vision_encoder.interpolate_antialias = False
+        _log.info("[Export Patch] 已强制关闭 TIPSv2 的 interpolate_antialias 属性")
+
     if vision_encoder and hasattr(vision_encoder, "blocks"):
         for block in vision_encoder.blocks:
             if hasattr(block, "attn"):
@@ -497,21 +501,10 @@ class DualTowerExporter:
             if not csv_path.is_file():
                 raise FileNotFoundError(f"未找到物种映射表 class_map_csv: {csv_path}")
 
-            df = pd.read_csv(csv_path)
-            required_cols = {"pest_cname", "pest_latin_name"}
-            if not required_cols.issubset(df.columns):
-                raise ValueError(f"class_map_csv 缺失必要列: {required_cols}")
-
-            latins = []
-            for idx, row in df.iterrows():
-                cname = str(row["pest_cname"]).strip()
-                latin = str(row["pest_latin_name"]).strip()
-                if not cname or not latin or cname.lower() == "nan" or latin.lower() == "nan":
-                    raise ValueError(f"class_map_csv 第 {idx + 2} 行存在空值或非法 'nan': cname='{cname}', latin='{latin}'")
-                latins.append(latin)
-
+            taxonomy = TaxonomyClasses.from_csv(csv_path)
             tmpl = self.model_cfg.eval.prompt_template or "{}"
-            return [tmpl.format(l) for l in latins]
+            candidate_texts = [tmpl.format(latin) for latin in taxonomy.latins]
+            return candidate_texts, taxonomy.is_positive
 
         if self.text_arg.endswith(".txt"):
             txt_path = Path(self.text_arg)
@@ -745,7 +738,7 @@ def build_export_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--text",
         default=None,
-        help="候选文本模式: 'close-set'(或'1')使用数据配置类目; 文本文件路径(.txt)自定义类目; 不传则导出解耦双塔",
+        help="Classifier: 'close-set'(或'1')使用默认配置类目; txt文件路径为自定义类目; None为导出双塔",
     )
     p.add_argument("--quant_mode", default=None, choices=["fp8", "fp4"], help="视觉塔 PTQ 量化模式")
     p.add_argument("--precision", default="fp16", choices=["fp16", "bf16", "fp32"], help="高精度回退格式")

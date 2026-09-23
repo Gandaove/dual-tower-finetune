@@ -51,7 +51,7 @@ class Trainer:
         self.dm = build_dual_tower_datamodule(cfg.data, cfg.train)
         self.dm.setup("fit")
 
-        self.model = build_dual_tower_model(cfg, classes=self.dm.cname_classes, transform=self.dm.transform)
+        self.model = build_dual_tower_model(cfg, classes=self.dm.taxonomy.cnames, transform=self.dm.transform)
 
         try:
             self.steps_per_epoch = len(self.dm.train_dataloader())
@@ -119,8 +119,7 @@ class Trainer:
         evaluator = Evaluator(
             self.model,
             self.cfg.model,
-            self.dm.cname_classes,
-            self.dm.latin_classes,
+            taxonomy=self.dm.taxonomy,
             device=self.model.device
         )
         val_dl = self.dm.val_dataloader()
