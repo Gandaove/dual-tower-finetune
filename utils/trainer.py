@@ -53,10 +53,9 @@ class Trainer:
 
         self.model = build_dual_tower_model(cfg, classes=self.dm.taxonomy.cnames, transform=self.dm.transform)
 
-        try:
-            self.steps_per_epoch = len(self.dm.train_dataloader())
-        except Exception:
-            self.steps_per_epoch = 2000
+        self.steps_per_epoch = len(self.dm.train_dataloader())
+        if self.steps_per_epoch <= 0:
+            raise ValueError("解析训练 DataLoader 长度为 0，请检查数据划分与 batch_size 配置。")
         self.model._steps_per_epoch = self.steps_per_epoch
 
         if cfg.train.ckpt_path and Path(cfg.train.ckpt_path).is_file():

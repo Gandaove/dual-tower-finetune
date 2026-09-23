@@ -381,7 +381,8 @@ class BaseDualTowerModel(LightningModule, ABC):
             self.model_cfg, 
             self.train_cfg.epochs, 
             getattr(self, "_steps_per_epoch", 2000), 
-            self.model_cfg.scheduler.interval
+            accumulate=self.train_cfg.accumulate,
+            interval=self.model_cfg.scheduler.interval
         )
         self._scheduler, self._sched_interval = sched, interval
         return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": interval}}

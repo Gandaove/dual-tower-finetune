@@ -327,15 +327,20 @@ def build_scheduler(
     model_cfg,
     total_epochs: int,
     steps_per_epoch: int,
+    accumulate: int = 1,
     interval: str = "step",
 ) -> Tuple[LRScheduler, str]:
     sc = model_cfg.scheduler
     base_lr = model_cfg.lr
     min_lr = model_cfg.min_lr
 
+    # 单轮优化器实际前进步数必须除以 accumulate
+    accumulate = max(1, int(accumulate))
+    effective_steps_per_epoch = max(1, math.ceil(steps_per_epoch / accumulate))
+
     if interval == "step":
-        total_steps = max(1, total_epochs * steps_per_epoch)
-        warmup_steps = max(1, int(round(sc.warmup_epochs * steps_per_epoch)))
+        total_steps = max(1, total_epochs * effective_steps_per_epoch)
+        warmup_steps = max(1, int(round(sc.warmup_epochs * effective_steps_per_epoch)))
     else:
         total_steps = max(1, total_epochs)
         warmup_steps = max(1, int(round(sc.warmup_epochs)))
@@ -354,7 +359,10 @@ def build_scheduler(
 
     if sc.enable == "multistep":
         ms = sc.multistep
-        milestones = [int(m * (steps_per_epoch if interval == "step" else 1)) for m in ms["milestones"]]
+        milestones = [
+            int(m * (effective_steps_per_epoch if interval == "step" else 1)) 
+            for m in ms["milestones"]
+        ]
         sched = MultiStepLR(optimizer, milestones=milestones, gamma=ms["gamma"])
         return sched, interval
 
