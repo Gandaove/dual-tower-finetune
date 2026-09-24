@@ -5,8 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 python export.py \
-    --ckpt_path outputs/tipsv2-20260921/merged/tipsv2-20260921.safetensors \
-    --output_dir outputs/tipsv2-20260921/trt \
+    --ckpt_path outputs/fgclip2-20260923/merged/fgclip2-20260924.safetensors \
+    --output_dir outputs/fgclip2-20260923/trt \
     --target_format engine \
     --precision bf16 \
     --max_batch_size 32 \

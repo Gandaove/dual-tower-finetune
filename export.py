@@ -504,7 +504,7 @@ class DualTowerExporter:
             taxonomy = TaxonomyClasses.from_csv(csv_path)
             tmpl = self.model_cfg.eval.prompt_template or "{}"
             candidate_texts = [tmpl.format(latin) for latin in taxonomy.latins]
-            return candidate_texts, taxonomy.is_positive
+            return candidate_texts
 
         if self.text_arg.endswith(".txt"):
             txt_path = Path(self.text_arg)
