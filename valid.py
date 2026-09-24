@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -131,10 +132,27 @@ class StandaloneValidator:
             device=self.device,
         )
 
-        metrics, _ = evaluator.evaluate(
+        metrics, proto = evaluator.evaluate(
             dataloader=dm.val_dataloader(),
             desc=f"[Validating: {self.ckpt_path.stem}]",
         )
+
+        if self.args.save_confusion_matrix and evaluator.last_confusion is not None:
+            # 提取全量预测与真值数组 (需在 evaluator.evaluate 循环中将 y_true_list/y_pred_list 赋给实例变量)
+            y_true = np.array(evaluator.y_true, dtype=np.int32)
+            y_pred = np.array(evaluator.y_pred, dtype=np.int32)
+
+            json_out = self.output_dir / "confusion_intensity.json"
+            png_out = self.output_dir / "full_confusion_matrix.png"
+
+            evaluator.export_full_confusion_artifacts(
+                y_true=y_true,
+                y_pred=y_pred,
+                proto=proto,
+                out_json_path=json_out,
+                out_png_path=png_out,
+                alpha=0.7,
+            )
 
         _log.info("==================== 验证指标结果 ====================")
         for k, v in metrics.items():
@@ -166,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch_size", type=int, default=None, help="批大小 (缺省回退快照 eval.batch_size，再回退 32)")
     p.add_argument("--num_workers", type=int, default=8, help="DataLoader 进程数")
     p.add_argument("--devices", default="auto", help="计算设备: 'auto', '0', '1', '-1'(cpu)")
+    p.add_argument("--save_confusion_matrix", action="store_true", help="是否计算并导出全量混淆强度 JSON 与热力图")
     return p
 
 

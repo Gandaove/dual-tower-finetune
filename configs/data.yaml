@@ -1,13 +1,11 @@
 # ============================================================
-# 数据配置
-# 对应 dataclass: utils.config.DataConfig
-# 语料 JSON 结构: {"relative/image/path.jpg": ["caption1", "caption2"]}
+# 语料 JSON 结构: {"relative/image/path.jpg": ["caption1", "caption2"...]}
 # ============================================================
 
 root: /home/syk/pest_cls_dataset            # 数据集根目录
 images: captions/multimodal.lmdb                       
-train: captions/shorter/train.json         # 相对 root
-val: captions/shorter/valid.json
+train: captions/v2/train.json         # 相对 root
+val: captions/v2/valid.json
 class_map_csv: captions/taxonomy.csv         # 包含[pest_name, alias, pest_latin_name]
 
 caption_sample: random                      # caption 采样策略: ["random", "first", "concat"]
@@ -52,5 +50,5 @@ augment:
     range: [0.01, 0.04]
     max_holes: 4
   normalize:
-    mean: [0, 0, 0]         # tipsv2: 0 / siglip2: 0.5
-    std: [1, 1, 1]          # tipsv2: 1 / siglip2: 0.5
+    mean: [0.5, 0.5, 0.5]         # tipsv2: 0 / siglip2: 0.5
+    std: [0.5, 0.5, 0.5]          # tipsv2: 1 / siglip2: 0.5

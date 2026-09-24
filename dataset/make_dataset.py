@@ -3,43 +3,126 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import re
+import os, re
+import pandas as pd
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
-
-import pandas as pd
 from tqdm import tqdm
 
+from utils.config import TaxonomyClasses
 
-class TaxonomyMapper:
-    """解析物种元数据表 (包含 index, pest_name, alias/pest_cname, pest_latin_name)"""
+RE_DIGIT = re.compile(r"\d+")
 
-    def __init__(self, taxonomy_csv: str | Path):
-        self.csv_path = Path(taxonomy_csv)
-        if not self.csv_path.is_file():
-            raise FileNotFoundError(f"物种映射表不存在: {self.csv_path}")
-        self._alias_to_latin: Dict[str, str] = {}
-        self._alias_to_name: Dict[str, str] = {}
-        self._load()
 
-    def _load(self):
-        df = pd.read_csv(self.csv_path)
-        # 兼容 alias 与 pest_cname 列名
-        alias_col = "alias" if "alias" in df.columns else ("pest_cname" if "pest_cname" in df.columns else None)
-        if not alias_col or "pest_latin_name" not in df.columns:
-            raise ValueError(f"物种映射表必须包含 ('alias' 或 'pest_cname') 以及 'pest_latin_name' 列")
+class CompetitorSelector:
+    """与混淆强度的相似类选择器"""
+    def __init__(
+        self,
+        taxonomy: TaxonomyClasses,
+        kb_loader: KnowledgeBaseLoader,
+        confusion_json_path: Optional[str | Path] = None,
+        hard_prob: float = 0.8,
+    ):
+        self.taxonomy = taxonomy
+        self.kb_loader = kb_loader
+        self.hard_prob = hard_prob
 
-        for _, row in df.iterrows():
-            alias = str(row[alias_col]).strip()
-            latin = str(row["pest_latin_name"]).strip()
-            pest_name = str(row["pest_name"]).strip() if "pest_name" in df.columns else ""
-            if alias and latin and alias.lower() != "nan" and latin.lower() != "nan":
-                self._alias_to_latin[alias.lower()] = latin
-                if pest_name:
-                    self._alias_to_name[alias.lower()] = pest_name
+        # 当前存在的合法别名全集 (自动兼容类别增删)
+        self.valid_aliases: Set[str] = set(self.taxonomy.alias_to_latin.keys())
+        self.precomputed_pos: Dict[str, Tuple[List[str], List[float]]] = {}
+        self.precomputed_neg: Dict[str, Tuple[List[str], List[float]]] = {}
 
-    def get_latin_name(self, alias: str) -> Optional[str]:
-        return self._alias_to_latin.get(alias.strip().lower())
+        if confusion_json_path:
+            p = Path(confusion_json_path)
+            if p.is_file():
+                with open(p, "r", encoding="utf-8") as f:
+                    raw_data = json.load(f)
+                self._precompile_distributions(raw_data)
+
+    def _precompile_distributions(self, raw_data: dict):
+        """一次性预编译所有类别的候选拉丁名及采样权重"""
+        compiled_count = 0
+        for src_alias, targets in tqdm(raw_data.items(), desc="[Precompile] 混淆转移分布预编译"):
+            src_clean = src_alias.strip().lower()
+            if src_clean not in self.valid_aliases:
+                continue
+
+            pos_latins, pos_weights = [], []
+            neg_latins, neg_weights = [], []
+
+            for tgt_alias, score in targets.items():
+                tgt_clean = tgt_alias.strip().lower()
+                if tgt_clean not in self.valid_aliases or tgt_clean == src_clean:
+                    continue
+
+                latin = self.taxonomy.get_latin(tgt_clean)
+                if not latin:
+                    continue
+
+                val = float(score)
+                if self.taxonomy.is_pos(tgt_clean):
+                    pos_latins.append(latin)
+                    pos_weights.append(val)
+                else:
+                    neg_latins.append(latin)
+                    neg_weights.append(val)
+
+            if pos_latins:
+                self.precomputed_pos[src_clean] = (pos_latins, pos_weights)
+            if neg_latins:
+                self.precomputed_neg[src_clean] = (neg_latins, neg_weights)
+
+            compiled_count += 1
+        print(f"[Info] 混淆转移分布预编译完成，有效映射物种数: {compiled_count}")
+
+    def _fallback_by_family(self, current_latin: str, only_positive: bool = False) -> Optional[str]:
+        """原版同科随机回退逻辑"""
+        family = self.kb_loader.get_family(current_latin)
+        if not family:
+            return None
+
+        all_in_family = set(self.kb_loader.family_to_species.get(family, []))
+        all_in_family.discard(current_latin.lower().strip())
+
+        # 获取当前 taxonomy 中所有正类的拉丁名
+        pos_latins = set(self.taxonomy.pos_latins)
+        pos_in_family = [s for s in all_in_family if s in pos_latins]
+
+        if pos_in_family:
+            return random.choice(pos_in_family)
+
+        if not only_positive:
+            other_in_family = list(all_in_family)
+            if other_in_family:
+                return random.choice(other_in_family)
+
+        return None
+
+    def select_for_positive(self, current_alias: str, current_latin: str) -> Optional[str]:
+        alias_clean = current_alias.strip().lower()
+        if random.random() < self.hard_prob:
+            # 优先级 1: 混淆正类 (C 实现单次快速抽样)
+            if alias_clean in self.precomputed_pos:
+                cand, weights = self.precomputed_pos[alias_clean]
+                return random.choices(cand, weights=weights, k=1)[0]
+            # 优先级 2: 混淆负类
+            if alias_clean in self.precomputed_neg:
+                cand, weights = self.precomputed_neg[alias_clean]
+                return random.choices(cand, weights=weights, k=1)[0]
+
+        # 兜底回退
+        return self._fallback_by_family(current_latin, only_positive=False)
+
+    def select_for_negative(self, current_alias: str, current_latin: str) -> Optional[str]:
+        alias_clean = current_alias.strip().lower()
+        if random.random() < self.hard_prob:
+            # 负类严格只与正类对比
+            if alias_clean in self.precomputed_pos:
+                cand, weights = self.precomputed_pos[alias_clean]
+                return random.choices(cand, weights=weights, k=1)[0]
+
+        return self._fallback_by_family(current_latin, only_positive=True)
 
 
 class BaseDatasetLoader:
@@ -190,37 +273,18 @@ class PositiveCaptionGenerator:
     def __init__(
         self,
         kb_loader: KnowledgeBaseLoader,
-        positive_latins: Set[str],
+        competitor_selector: CompetitorSelector,
         num_dim_range: Tuple[int, int] = (3, 4),
         contrast_prob: float = 0.5,
         simple_prob: float = 0.3,
         prompt_prefix: str = "A photo of a",
     ):
         self.kb_loader = kb_loader
-        self.positive_latins = positive_latins
+        self.selector = competitor_selector
         self.num_dim_range = num_dim_range
         self.contrast_prob = contrast_prob
         self.simple_prob = simple_prob
         self.prompt_prefix = prompt_prefix
-
-    def _select_competitor(self, current_latin: str) -> Optional[str]:
-        family = self.kb_loader.get_family(current_latin)
-        if not family:
-            return None
-
-        all_in_family = set(self.kb_loader.family_to_species.get(family, []))
-        all_in_family.discard(current_latin.lower().strip())
-
-        # 优先选择同科正类
-        pos_in_family = [s for s in all_in_family if s in self.positive_latins]
-        if pos_in_family:
-            return random.choice(pos_in_family)
-
-        # 次选同科其他物种
-        other_in_family = list(all_in_family)
-        if other_in_family:
-            return random.choice(other_in_family)
-        return None
 
     def generate(self, alias: str, latin_name: str, num_captions: int = 2) -> List[str]:
         info = self.kb_loader.get(latin_name)
@@ -244,11 +308,12 @@ class PositiveCaptionGenerator:
 
             dim_phrases = BaseCaptionFormatter.sample_dimensions(info.get("dimensions", {}), self.num_dim_range)
 
+            # 核心调用点：通过 selector 依据混淆权重挑选竞争对手
             contrast_phrase = None
             if random.random() < self.contrast_prob:
-                competitor = self._select_competitor(latin_name)
-                if competitor:
-                    contrast_phrase = BaseCaptionFormatter.build_contrast_phrase(info, competitor)
+                competitor_latin = self.selector.select_for_positive(alias, latin_name)
+                if competitor_latin:
+                    contrast_phrase = BaseCaptionFormatter.build_contrast_phrase(info, competitor_latin)
 
             parts = [prefix] + dim_phrases
             if contrast_phrase:
@@ -268,17 +333,17 @@ class NegativeSampleHandler:
 
     def __init__(
         self,
-        tax_mapper: TaxonomyMapper,
+        taxonomy: TaxonomyClasses,
         kb_loader: KnowledgeBaseLoader,
-        positive_latins: Set[str],
+        competitor_selector: CompetitorSelector,
         num_dim_range: Tuple[int, int] = (2, 4),
         contrast_prob: float = 0.5,
         simple_prob: float = 0.2,
         prompt_prefix: str = "A photo of a",
     ):
-        self.tax_mapper = tax_mapper
+        self.taxonomy = taxonomy
         self.kb_loader = kb_loader
-        self.positive_latins = positive_latins
+        self.selector = competitor_selector
         self.num_dim_range = num_dim_range
         self.contrast_prob = contrast_prob
         self.simple_prob = simple_prob
@@ -291,28 +356,14 @@ class NegativeSampleHandler:
         parts = stem.split("_")
         # 从末尾倒序查找首个包含字母的有效分块
         for part in reversed(parts):
-            cleaned = re.sub(r"\d+", "", part).strip()
+            cleaned = RE_DIGIT.sub("", part).strip()
             if cleaned:
                 return cleaned.lower()
         return "negative"
 
-    def _select_positive_competitor_in_family(self, current_latin: str) -> Optional[str]:
-        family = self.kb_loader.get_family(current_latin)
-        if not family:
-            return None
-
-        all_in_family = set(self.kb_loader.family_to_species.get(family, []))
-        all_in_family.discard(current_latin.lower().strip())
-
-        # 负样本仅允许挑选同科的正类物种
-        pos_in_family = [s for s in all_in_family if s in self.positive_latins]
-        if pos_in_family:
-            return random.choice(pos_in_family)
-        return None
-
     def process_sample(self, img_name: str, num_captions: int = 2) -> Tuple[str, List[str]]:
         alias = self.extract_alias_from_filename(img_name)
-        latin_name = self.tax_mapper.get_latin_name(alias)
+        latin_name = self.taxonomy.get_latin(alias)
 
         if not latin_name:
             fallback = BaseCaptionFormatter.make_fallback(alias, self.prompt_prefix, num_captions)
@@ -335,11 +386,12 @@ class NegativeSampleHandler:
 
             dim_phrases = BaseCaptionFormatter.sample_dimensions(info.get("dimensions", {}), self.num_dim_range)
 
+            # 核心调用点：负类样本严格挑选正类混淆对手
             contrast_phrase = None
             if random.random() < self.contrast_prob:
-                competitor = self._select_positive_competitor_in_family(latin_name)
-                if competitor:
-                    contrast_phrase = BaseCaptionFormatter.build_contrast_phrase(info, competitor)
+                competitor_latin = self.selector.select_for_negative(alias, latin_name)
+                if competitor_latin:
+                    contrast_phrase = BaseCaptionFormatter.build_contrast_phrase(info, competitor_latin)
 
             parts = [prefix] + dim_phrases
             if contrast_phrase:
@@ -412,6 +464,23 @@ class DatasetSplitter:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _worker_process_chunk(chunk_records, pos_generator, neg_handler, taxonomy, num_captions):
+    """并发生成 Captions"""
+    results = []
+    for img_name, class_id, base_alias in chunk_records:
+        if class_id == -1 or base_alias.lower() == "negative":
+            actual_alias, captions = neg_handler.process_sample(img_name, num_captions=num_captions)
+            is_neg = True
+        else:
+            actual_alias = base_alias
+            latin = taxonomy.get_latin(actual_alias)
+            captions = pos_generator.generate(actual_alias, latin, num_captions=num_captions)
+            is_neg = False
+
+        results.append((img_name, actual_alias, captions, is_neg))
+    return results
+
+
 class DatasetPipeline:
     """顶层管线：协调正负样本分流、物理文件检索与存储产出"""
 
@@ -420,21 +489,20 @@ class DatasetPipeline:
         self.img_root = Path(args.img_root)
         self.out_dir = Path(args.out_dir)
 
-        self.tax_mapper = TaxonomyMapper(args.taxonomy_csv)
+        self.taxonomy = TaxonomyClasses.from_csv(args.taxonomy_csv)
         self.base_loader = BaseDatasetLoader(args.dataset_csv, args.class_map_json)
         self.kb_loader = KnowledgeBaseLoader(args.caption_jsons)
 
-        # 统计正样本实际存在的拉丁名集合
-        pos_aliases = self.base_loader.get_positive_aliases()
-        self.positive_latins: Set[str] = {
-            self.tax_mapper.get_latin_name(a).lower()
-            for a in pos_aliases
-            if self.tax_mapper.get_latin_name(a)
-        }
+        self.competitor_selector = CompetitorSelector(
+            taxonomy=self.taxonomy,
+            kb_loader=self.kb_loader,
+            confusion_json_path=getattr(args, "confusion_json", None),
+            hard_prob=args.hard_prob,
+        )
 
         self.pos_generator = PositiveCaptionGenerator(
             kb_loader=self.kb_loader,
-            positive_latins=self.positive_latins,
+            competitor_selector=self.competitor_selector,
             num_dim_range=(args.min_dims, args.max_dims),
             contrast_prob=args.contrast_prob,
             simple_prob=args.simple_prob,
@@ -442,9 +510,9 @@ class DatasetPipeline:
         )
 
         self.neg_handler = NegativeSampleHandler(
-            tax_mapper=self.tax_mapper,
+            taxonomy=self.taxonomy,
             kb_loader=self.kb_loader,
-            positive_latins=self.positive_latins,
+            competitor_selector=self.competitor_selector,
             num_dim_range=(args.min_dims, args.max_dims),
             contrast_prob=args.contrast_prob,
             simple_prob=args.simple_prob,
@@ -454,61 +522,98 @@ class DatasetPipeline:
         self.splitter = DatasetSplitter(ratios=args.ratios, seed=args.seed)
         self.manifest_records: List[Tuple[str, List[str]]] = []
         self.image_records: List[Tuple[str, Path]] = []
+        self.img_cache: Dict[str, Path] = {}
+
+    def _build_image_cache(self):
+        """单次预先遍历全量图像，建立内存哈希索引，避免循环内部多次 stat 磁盘"""
+        print("[Indexing] 正在预建图像磁盘文件索引...")
+        valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        for p in self.img_root.rglob("*"):
+            if p.suffix.lower() in valid_exts:
+                self.img_cache[p.name] = p
+                rel_key = f"{p.parent.name}/{p.name}"
+                self.img_cache[rel_key] = p
+        print(f"[Indexing] 内存索引构建完成，已收录文件数: {len(self.img_cache)}")
 
     def _locate_image(self, candidate_dirs: List[str], img_name: str) -> Optional[Path]:
         for d in candidate_dirs:
-            if d:
-                p = self.img_root / d / img_name
-                if p.is_file():
-                    return p
-        p = self.img_root / img_name
-        if p.is_file():
-            return p
-        return None
+            key = f"{d}/{img_name}"
+            if key in self.img_cache:
+                return self.img_cache[key]
+        return self.img_cache.get(img_name)
 
     def process(self):
+        self._build_image_cache()
+
+        records = self.base_loader.records
+        num_workers = min(os.cpu_count() or 4, 16)
+        chunk_size = (len(records) + num_workers - 1) // num_workers
+        chunks = [records[i : i + chunk_size] for i in range(0, len(records), chunk_size)]
+
+        print(f"[Processing] 启动 {num_workers} 个进程并行生成 Captions...")
+        processed_results = []
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = [
+                executor.submit(
+                    _worker_process_chunk,
+                    chunk,
+                    self.pos_generator,
+                    self.neg_handler,
+                    self.taxonomy,
+                    self.args.num_captions,
+                )
+                for chunk in chunks
+            ]
+            for f in tqdm(futures, desc="[Parallel Workers]"):
+                processed_results.extend(f.result())
+
         missing_imgs = 0
         pos_count = 0
         neg_count = 0
 
-        for img_name, class_id, base_alias in tqdm(self.base_loader.records, desc="[Processing] Records"):
-            if class_id == -1 or base_alias.lower() == "negative":
-                actual_alias, captions = self.neg_handler.process_sample(
-                    img_name, num_captions=self.args.num_captions
-                )
-                img_file = self._locate_image([actual_alias, "negative"], img_name)
-                neg_count += 1
-            else:
-                actual_alias = base_alias
-                latin = self.tax_mapper.get_latin_name(actual_alias)
-                captions = self.pos_generator.generate(
-                    actual_alias, latin, num_captions=self.args.num_captions
-                )
-                img_file = self._locate_image([actual_alias], img_name)
-                pos_count += 1
+        for img_name, actual_alias, captions, is_neg in tqdm(processed_results, desc="[Resolving Images]"):
+            candidate_dirs = [actual_alias, "negative"] if is_neg else [actual_alias]
+            img_file = self._locate_image(candidate_dirs, img_name)
 
             if img_file is None:
                 missing_imgs += 1
                 continue
+
+            if is_neg:
+                neg_count += 1
+            else:
+                pos_count += 1
 
             composite_key = f"{actual_alias}+{img_name}"
             self.manifest_records.append((composite_key, captions))
             if self.args.make_lmdb:
                 self.image_records.append((composite_key, img_file))
 
-        print(f"[Summary] 完成构建: 正样本 {pos_count} 条, 难分负样本 {neg_count} 条")
+        print(f"[Summary] 完成构建: 正样本 {pos_count} 条, 负样本 {neg_count} 条")
         if missing_imgs > 0:
             print(f"[Warning] 磁盘未命中物理图像数: {missing_imgs}")
 
     def export(self):
         train_data, val_data, test_data = self.splitter.split(self.manifest_records)
-        DatasetSplitter.export_json(train_data, self.out_dir / "train.json")
-        DatasetSplitter.export_json(val_data, self.out_dir / "valid.json")
+        try:
+            import orjson
+            def _dump_json(data, path: Path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(orjson.dumps(data))
+        except ImportError:
+            def _dump_json(data, path: Path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+
+        _dump_json(train_data, self.out_dir / "train.json")
+        _dump_json(val_data, self.out_dir / "valid.json")
         print(f"[Export] train.json: {len(train_data)} 项 -> {self.out_dir / 'train.json'}")
         print(f"[Export] valid.json: {len(val_data)} 项 -> {self.out_dir / 'valid.json'}")
 
         if test_data is not None:
-            DatasetSplitter.export_json(test_data, self.out_dir / "test.json")
+            _dump_json(test_data, self.out_dir / "test.json")
             print(f"[Export] test.json: {len(test_data)} 项 -> {self.out_dir / 'test.json'}")
 
         if self.args.make_lmdb:
@@ -538,6 +643,10 @@ def main():
     parser.add_argument("--min_dims", type=int, default=3, help="采样解剖维度的最小数量")
     parser.add_argument("--max_dims", type=int, default=4, help="采样解剖维度的最大数量")
     parser.add_argument("--prompt_prefix", type=str, default="A photo of a", help="Prompt 通用前缀")
+
+    parser.add_argument("--confusion_json", default=None, help="可选：由 valid.py 导出的 confusion_intensity.json 路径")
+    parser.add_argument("--hard_prob", type=float, default=0.8, help="按混淆强度针对性采样的概率 (其余回退同科)")
+
     parser.add_argument("--make_lmdb", action="store_true", help="是否打包单文件 LMDB")
     parser.add_argument("--lmdb_out", default=None, help="LMDB 保存路径")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")

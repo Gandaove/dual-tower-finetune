@@ -217,12 +217,30 @@ class TaxonomyClasses:
         return [self.latins[i] for i in self.pos_indices]
 
     @property
-    def cname_to_idx(self) -> Dict[str, int]:
+    def alias_to_idx(self) -> Dict[str, int]:
         return {name: i for i, name in enumerate(self.cnames)}
 
     @property
     def idx_to_cname(self) -> Dict[int, str]:
         return {i: name for i, name in enumerate(self.cnames)}
+
+    @property
+    def alias_to_latin(self) -> Dict[str, str]:
+        """别名至拉丁学名的映射字典"""
+        return {c.lower(): l for c, l in zip(self.cnames, self.latins)}
+
+    @property
+    def alias_to_is_pos(self) -> Dict[str, bool]:
+        """别名至正负类标识的映射字典"""
+        return {c.lower(): p for c, p in zip(self.cnames, self.is_positive)}
+
+    def get_latin(self, alias: str) -> Optional[str]:
+        """依据别名获取标准拉丁学名"""
+        return self.alias_to_latin.get(alias.strip().lower())
+
+    def is_pos(self, alias: str) -> bool:
+        """判定该别名是否属于正类"""
+        return self.alias_to_is_pos.get(alias.strip().lower(), False)
 
     @classmethod
     def from_csv(cls, csv_path: Union[str, Path]) -> "TaxonomyClasses":

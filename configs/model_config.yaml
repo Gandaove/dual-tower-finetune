@@ -15,14 +15,14 @@ max_text_length: 196                                     # [64, {...}, 196]
 text_padding: max_length                                 # [max_length, longest, false]
 
 # ------------------------- 优化器 ---------------------------
-lr: 0.0005                                                 # 峰值学习率(warmup 结束后的起点)
+lr: 0.00015                                                 # 峰值学习率(warmup 结束后的起点)
 min_lr: 0.00000001                                          # 余弦/线性退火的下界
 optimizer:
   enable: AdamW                                              # ["AdamW", "MuSGD"]
   weight_decay: 0.001
   betas: [0.9, 0.999]
   eps: 0.00000001
-  layer_decay: 0.7                                          # LLRD 逐层学习率衰减; null 或 1.0 关闭
+  layer_decay: 0.72                                          # LLRD 逐层学习率衰减; null 或 1.0 关闭
   head_lr_scale: 2.5                                        # logit_scale/logit_bias/投影头的 lr 放大倍数
   musgd:                                                     # enable=MuSGD 时生效
     use_muon: true
@@ -35,8 +35,8 @@ optimizer:
 # ------------------------- 调度器 ---------------------------
 scheduler:
   enable: cosine                                             # ["linear", "cosine", "onecycle", "multistep"]
-  warmup_epochs: 8                                          
-  warmup_start_factor: 0.1                                  # warmup 起始 lr = lr * factor
+  warmup_epochs: 7                                          
+  warmup_start_factor: 0.08                                  # warmup 起始 lr = lr * factor
   interval: step                                             # ["step", "epoch"] 调度粒度
   multistep:
     milestones: [10, 20]                                     # 单位: epoch

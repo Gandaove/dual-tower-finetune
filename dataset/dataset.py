@@ -154,7 +154,7 @@ class DualTowerDataset(Dataset):
             if not file_path.is_file():
                 file_path = self.raw_images_dir / img_name
         else:
-            file_path = self.raw_images_dir / key
+            file_path = self.raw_images_dir / cname / key
 
         if file_path.is_file():
             return file_path.read_bytes()
