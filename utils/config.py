@@ -193,6 +193,9 @@ class TaxonomyClasses:
     cnames: List[str]
     latins: List[str]
     is_positive: List[bool]
+    families: List[str]
+    orders: List[str]
+    anchors: Optional[List[str]] = None
 
     @property
     def total_count(self) -> int:
@@ -238,12 +241,31 @@ class TaxonomyClasses:
         """依据别名获取标准拉丁学名"""
         return self.alias_to_latin.get(alias.strip().lower())
 
+    def format_prompts(self, template: str) -> List[str]:
+        """
+        支持 {latin}, {anchor}, {family}, {order}
+        """
+        prompts = []
+        for i, (latin, family, order) in enumerate(zip(self.latins, self.families, self.orders)):
+            fam_clean = family.strip()
+            ord_clean = order.strip()
+            anchor_clean = self.anchors[i] if (self.anchors and i < len(self.anchors)) else "insect"
+
+            prompt = template.format(
+                latin=latin,
+                anchor=anchor_clean,
+                family=fam_clean,
+                order=ord_clean
+            )
+            prompts.append(prompt)
+        return prompts
+
     def is_pos(self, alias: str) -> bool:
         """判定该别名是否属于正类"""
         return self.alias_to_is_pos.get(alias.strip().lower(), False)
 
     @classmethod
-    def from_csv(cls, csv_path: Union[str, Path]) -> "TaxonomyClasses":
+    def from_csv(cls, csv_path: Union[str, Path], anchors_yaml: Optional[Union[str, Path]] = None) -> "TaxonomyClasses":
         p = Path(csv_path)
         if not p.is_file():
             raise FileNotFoundError(f"未找到物种映射表 class_map_csv: {p}")
@@ -253,14 +275,17 @@ class TaxonomyClasses:
         if not required_cols.issubset(df.columns):
             raise ValueError(f"class_map_csv 必须包含以下列: {str(required_cols)}")
 
-        cnames: List[str] = []
-        latins: List[str] = []
-        is_pos: List[bool] = []
+        fam_col = "family" if "family" in df.columns else ("pest_family" if "pest_family" in df.columns else None)
+        ord_col = "order" if "order" in df.columns else ("pest_order" if "pest_order" in df.columns else None)
+
+        cnames, latins, is_pos, families, orders = [], [], [], [], []
 
         for idx, row in df.iterrows():
             cname = str(row["alias"]).strip()
             latin = str(row["pest_latin_name"]).strip()
             pos_flag = int(row["is_positive"]) == 1
+            fam = str(row[fam_col]).strip() if (fam_col and pd.notna(row[fam_col])) else ""
+            ord_ = str(row[ord_col]).strip() if (ord_col and pd.notna(row[ord_col])) else ""
 
             if not cname or not latin or cname.lower() == "nan" or latin.lower() == "nan":
                 raise ValueError(f"第 {idx + 2} 行存在空值或非法 'nan': alias='{cname}', latin='{latin}'")
@@ -268,8 +293,14 @@ class TaxonomyClasses:
             cnames.append(cname)
             latins.append(latin)
             is_pos.append(pos_flag)
+            families.append("" if fam.lower() == "nan" else fam)
+            orders.append("" if ord_.lower() == "nan" else ord_)
 
-        return cls(cnames=cnames, latins=latins, is_positive=is_pos)
+        from dataset.make_dataset import AnchorManager
+        anchor_mgr = AnchorManager(anchors_yaml)
+        anchors = [anchor_mgr.resolve(fam, ord_) for fam, ord_ in zip(families, orders)]
+
+        return cls(cnames=cnames, latins=latins, is_positive=is_pos, families=families, orders=orders, anchors=anchors)
 
 
 @dataclass

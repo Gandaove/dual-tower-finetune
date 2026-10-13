@@ -502,9 +502,8 @@ class DualTowerExporter:
                 raise FileNotFoundError(f"未找到物种映射表 class_map_csv: {csv_path}")
 
             taxonomy = TaxonomyClasses.from_csv(csv_path)
-            tmpl = self.model_cfg.eval.prompt_template or "{}"
-            candidate_texts = [tmpl.format(latin) for latin in taxonomy.latins]
-            return candidate_texts
+            tmpl = self.model_cfg.eval.prompt_template or "A photo of a {latin}, belonging to family {family}, order {order}."
+            return taxonomy.format_prompts(tmpl)
 
         if self.text_arg.endswith(".txt"):
             txt_path = Path(self.text_arg)

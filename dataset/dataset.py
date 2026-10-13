@@ -5,7 +5,8 @@ import json
 import os
 import random
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from collections import defaultdict, Counter
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterator
 
 import cv2
 import numpy as np
@@ -13,7 +14,7 @@ import pandas as pd
 import torch
 from PIL import Image
 from pytorch_lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from dataset.augment import DualTowerTransforms
 from utils.config import DataConfig, TrainConfig, TaxonomyClasses
@@ -106,6 +107,111 @@ class ImageIOHandler:
             return cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         with Image.open(io.BytesIO(raw_bytes)) as pil_img:
             return np.array(pil_img.convert("RGB"))
+
+
+class HardNegativeBatchSampler(Sampler[List[int]]):
+    """基于混淆度矩阵的动态 PK 批次采样器 (P=batch_size, K=1)。
+      1. 每个 Batch 随机挑选一个锚点物种 (Anchor Class);
+      2. 依据混淆强度转移分布，挑选与其最易混淆的 (batch_size - 1) 个不同物种;
+      3. 各类别内仅随机抽取 1 个样本索引，杜绝 Batch 内同类误杀与类内碰撞。(不足batch_size则随机取样补全)
+    """
+
+    def __init__(
+        self,
+        dataset_items: List[Tuple[str, List[str]]],
+        batch_size: int,
+        confusion_json: Optional[str | Path] = None,
+        hard_prob: float = 0.8,
+        seed: int = 42,
+    ):
+        self.batch_size = batch_size
+        self.hard_prob = hard_prob
+        self.rng = random.Random(seed)
+
+        self.alias_to_indices: Dict[str, List[int]] = defaultdict(list)
+        for idx, (key, _) in enumerate(dataset_items):
+            alias = key.split("+", 1)[0] if "+" in key else Path(key).parent.name
+            self.alias_to_indices[alias].append(idx)
+
+        self.all_aliases = list(self.alias_to_indices.keys())
+        self.confusion_distributions: Dict[str, Tuple[List[str], List[float]]] = {}
+        if confusion_json:
+            self._load_confusion_json(Path(confusion_json))
+
+        self.num_batches = max(1, len(dataset_items) // self.batch_size)
+
+    def _load_confusion_json(self, json_path: Path):
+        if not json_path.is_file():
+            return
+        with open(json_path, "r", encoding="utf-8") as f:
+            raw_data: Dict[str, Dict[str, float]] = json.load(f)
+
+        for src, targets in raw_data.items():
+            src_clean = src.strip().lower()
+            if src_clean not in self.alias_to_indices:
+                continue
+
+            cands, weights = [], []
+            for dst, score in targets.items():
+                dst_clean = dst.strip().lower()
+                if dst_clean in self.alias_to_indices and dst_clean != src_clean:
+                    cands.append(dst_clean)
+                    weights.append(float(score))
+
+            if cands:
+                self.confusion_distributions[src_clean] = (cands, weights)
+
+    def _weighted_sample_no_replace(self, pop: List[str], weights: List[float], k: int) -> List[str]:
+        p, w = list(pop), list(weights)
+        res = []
+        for _ in range(k):
+            chosen = self.rng.choices(p, weights=w, k=1)[0]
+            idx = p.index(chosen)
+            res.append(chosen)
+            p.pop(idx)
+            w.pop(idx)
+        return res
+
+    def __len__(self) -> int:
+        return self.num_batches
+
+    def __iter__(self) -> Iterator[List[int]]:
+        for _ in range(self.num_batches):
+            anchor = self.rng.choice(self.all_aliases)
+            selected_aliases = [anchor]
+
+            # 优先依据混淆权重挑选竞争物种
+            if self.rng.random() < self.hard_prob and anchor in self.confusion_distributions:
+                cands, weights = self.confusion_distributions[anchor]
+                k = min(len(cands), self.batch_size - 1)
+                selected_aliases.extend(self._weighted_sample_no_replace(cands, weights, k))
+
+            # 补齐剩余类别，确保类别去重最大化
+            remains = [a for a in self.all_aliases if a not in selected_aliases]
+            self.rng.shuffle(remains)
+            selected_aliases.extend(remains)
+
+            # 截断或自适应平铺至 batch_size
+            if len(selected_aliases) >= self.batch_size:
+                final_aliases = selected_aliases[: self.batch_size]
+            else:
+                # 兼容类别数小于 batch_size: 优先复用高混淆类与锚点
+                extra_needed = self.batch_size - len(selected_aliases)
+                extra = self.rng.choices(selected_aliases, k=extra_needed)
+                final_aliases = selected_aliases + extra
+
+            # 类别内抽样 (优先无放回以压低图像重复率)
+            batch_indices = []
+            counts = Counter(final_aliases)
+            for alias, count in counts.items():
+                pool = self.alias_to_indices[alias]
+                if len(pool) >= count:
+                    batch_indices.extend(self.rng.sample(pool, count))
+                else:
+                    batch_indices.extend(self.rng.choices(pool, k=count))
+
+            self.rng.shuffle(batch_indices)
+            yield batch_indices
 
 
 class DualTowerDataset(Dataset):
@@ -291,6 +397,26 @@ class DualTowerDataModule(LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         if self._train_ds is None:
             raise RuntimeError("Train dataset 未初始化，请先调用 setup('fit')")
+        
+        confusion_json = getattr(self.cfg, "confusion_json", None)
+        if confusion_json and Path(confusion_json).is_file():
+            # 使用基于混淆度矩阵的动态 PK 采样器
+            batch_sampler = HardNegativeBatchSampler(
+                dataset_items=self._train_ds.items,
+                batch_size=self.train_cfg.batch_size,
+                confusion_json=confusion_json,
+                hard_prob=getattr(self.cfg, "hard_prob", 0.8),
+                seed=self.train_cfg.seed,
+            )
+            return DataLoader(
+                self._train_ds,
+                batch_sampler=batch_sampler,
+                num_workers=self.train_cfg.num_workers,
+                collate_fn=collate_fn,
+                pin_memory=torch.cuda.is_available(),
+                persistent_workers=self.train_cfg.num_workers > 0,
+            )
+        
         return DataLoader(
             self._train_ds,
             batch_size=self.train_cfg.batch_size,

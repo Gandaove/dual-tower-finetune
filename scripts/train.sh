@@ -7,12 +7,12 @@ cd "$(dirname "$0")/.."
 python train.py \
     --model_config configs/model_config.yaml \
     --data_config  configs/data.yaml \
-    --output_dir   ./outputs/fgclip2-20260924 \
-    --freeze_mode  text \
-    --batch_size   64 \
+    --output_dir   ./outputs/tipsv2-20261013 \
+    --freeze_mode  none \
+    --batch_size   12 \
     --accumulate   4 \
-    --epochs       40 \
+    --epochs       50 \
     --num_workers  6 \
-    --patience     5 \
-    --seed         46874654 \
+    --patience     8 \
+    --seed         31554656 \
     "$@"

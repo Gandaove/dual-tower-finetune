@@ -4,19 +4,23 @@
 
 root: /home/syk/pest_cls_dataset            # 数据集根目录
 images: captions/multimodal.lmdb                       
-train: captions/v2/train.json         # 相对 root
-val: captions/v2/valid.json
+train: captions/v4/train.json         # 相对 root
+val: captions/v4/valid.json
 class_map_csv: captions/taxonomy.csv         # 包含[pest_name, alias, pest_latin_name]
 
 caption_sample: random                      # caption 采样策略: ["random", "first", "concat"]
 val_caption_sample: first                   # 验证集固定取首条, 保证指标可复现
 
+confusion_json: outputs/fgclip2-20260929/valid1/confusion_intensity.json         # 混淆强度json
+hard_prob: 0.4
+anchors_yaml: /home/syk/pest_cls_dataset/captions/anchors.yaml
+
 augment:
   enabled: true
-  close_augment_epoch: 25                  # 该 epoch 起关闭增强(仅保留 resize/normalize)
+  close_augment_epoch: 30                  # 该 epoch 起关闭增强(仅保留 resize/normalize)
   resize:
     method: "letterbox"                     # ["shortest_edge", "letterbox", "direct"]
-    size: 224                            # tipsv2: 448 / siglip2: 224
+    size: 448                               # tipsv2: 448 / siglip2: 224
     interp: "bilinear"                      # ["bilinear", "bicubic", "nearest"]
     pad_value: 114                          # letterbox 填充灰度
   crop:
@@ -40,7 +44,7 @@ augment:
     h: 0.015
     s: 0.5
     v: 0.4
-    prob: 0.25
+    prob: 0.3
   gauss_blur:
     blur: [3, 5]
     sigma: [0.3, 1]
@@ -50,5 +54,5 @@ augment:
     range: [0.01, 0.04]
     max_holes: 4
   normalize:
-    mean: [0.5, 0.5, 0.5]         # tipsv2: 0 / siglip2: 0.5
-    std: [0.5, 0.5, 0.5]          # tipsv2: 1 / siglip2: 0.5
+    mean: [0, 0, 0]         # tipsv2: 0 / siglip2: 0.5
+    std: [1, 1, 1]          # tipsv2: 1 / siglip2: 0.5

@@ -65,8 +65,8 @@ class Evaluator:
         if not self.taxonomy.latins:
             return None
 
-        tmpl = self.eval_cfg.prompt_template
-        prompts = [tmpl.format(latin) for latin in self.taxonomy.latins]
+        tmpl = self.eval_cfg.prompt_template or "A photo of a {latin}, belonging to family {family}, order {order}."
+        prompts = self.taxonomy.format_prompts(tmpl)
         feats = []
 
         with self.autocast_ctx:
