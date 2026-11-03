@@ -1,12 +1,3 @@
-"""数据增强与预处理。
-
-设计:
-  - 以 Albumentations 为主, letterbox resize 为自定义实现(cv2 完成);
-  - 增强在 uint8 numpy 上完成, 最后统一归一化并转为 float32 [0,1];
-  - 提供 close_augment 开关: 到达指定 epoch 后仅保留 resize/normalize(由 DataModule 控制)。
-
-图像相关操作统一使用 cv2(Skill §4.1)。
-"""
 from __future__ import annotations
 
 import albumentations as A
@@ -51,6 +42,55 @@ class DualTowerTransforms:
         canvas[top:top + nh, left:left + nw] = resized
         return canvas
 
+    @staticmethod
+    def apply_crop(
+        image: np.ndarray,
+        method: str,
+        scale_range: tuple[float, float],
+        directional_prob: float = 0.5,
+    ) -> np.ndarray:
+        h, w = image.shape[:2]
+        if h < 16 or w < 16:
+            return image
+
+        s_min, s_max = scale_range
+        ratio = np.random.uniform(s_min, s_max)
+
+        # 若为 hybrid 模式，按 directional_prob 概率路由至单侧整刀裁切
+        actual_method = method
+        if method == "hybrid":
+            actual_method = "directional" if np.random.rand() < directional_prob else "random"
+
+        # 分支 1: 定向单侧整刀裁切 (保持另一维度为 100% 原尺寸)
+        if actual_method == "directional":
+            # 随机选择截断方向: 0=切左侧, 1=切右侧, 2=切上方, 3=切下方
+            direction = np.random.randint(0, 4)
+            if direction in (0, 1):  # 宽度方向裁切，高度保持 h 不变 (如 200x200 -> 140x200)
+                cw = max(8, int(round(w * ratio)))
+                if direction == 0:
+                    return image[:, w - cw :]  # 切掉左侧，保留右侧 cw
+                else:
+                    return image[:, :cw]       # 切掉右侧，保留左侧 cw
+            else:                    # 高度方向裁切，宽度保持 w 不变 (如 200x200 -> 200x140)
+                ch = max(8, int(round(h * ratio)))
+                if direction == 2:
+                    return image[h - ch :, :]  # 切掉上方，保留下方 ch
+                else:
+                    return image[:ch, :]       # 切掉下方，保留上方 ch
+
+        # 分支 2: 常规双轴同比例裁剪 (center 或 random)
+        ch = max(8, int(round(h * ratio)))
+        cw = max(8, int(round(w * ratio)))
+
+        if actual_method == "center":
+            top = (h - ch) // 2
+            left = (w - cw) // 2
+        else:  # "random"
+            top = np.random.randint(0, max(1, h - ch + 1))
+            left = np.random.randint(0, max(1, w - cw + 1))
+
+        return image[top : top + ch, left : left + cw]
+
     # ---------------- 构建 ---------------- #
     def _common_resize(self, train: bool):
         a = self.aug
@@ -67,13 +107,19 @@ class DualTowerTransforms:
 
     def _build_train(self):
         a = self.aug
-        ops = [self._common_resize(train=True)]
+        ops = []
 
-        if a.crop.enabled:
-            if a.crop.method == "random":
-                ops.append(A.RandomCrop(height=a.crop.size, width=a.crop.size))
-            else:
-                ops.append(A.CenterCrop(height=a.crop.size, width=a.crop.size))
+        if a.crop.enabled and a.crop.prob > 0:
+            scale_tuple = (float(a.crop.scale[0]), float(a.crop.scale[1]))
+            crop_method = a.crop.method.lower()
+            dir_prob = a.crop.directional_prob
+
+            def _crop_op(image, **kwargs):
+                return self.apply_crop(image, crop_method, scale_tuple, dir_prob)
+
+            ops.append(A.Lambda(name="AdaptiveCrop", image=_crop_op, p=a.crop.prob))
+
+        ops.append(self._common_resize(train=True))
 
         if a.flip and a.flip > 0:
             ops.append(A.HorizontalFlip(p=a.flip))
@@ -86,6 +132,7 @@ class DualTowerTransforms:
                 p=a.rotate.prob,
                 border_mode=0,
                 interpolation=resolve_interp(a.resize.interp),
+                fill=(a.resize.pad_value, a.resize.pad_value, a.resize.pad_value)
             ))
 
         if a.affine.prob > 0:
@@ -95,7 +142,7 @@ class DualTowerTransforms:
                 translate_percent=a.affine.percent,
                 p=a.affine.prob,
                 interpolation=resolve_interp(a.resize.interp),
-                fill=0,
+                fill=(a.resize.pad_value, a.resize.pad_value, a.resize.pad_value),
             ))
 
         if a.perspective.prob > 0:
@@ -104,6 +151,7 @@ class DualTowerTransforms:
                 p=a.perspective.prob,
                 border_mode=0,
                 interpolation=resolve_interp(a.resize.interp),
+                fill=(a.resize.pad_value, a.resize.pad_value, a.resize.pad_value),
             ))
 
         if a.hsv.prob > 0:
@@ -129,7 +177,7 @@ class DualTowerTransforms:
                     num_holes_range=(1, a.erase.max_holes),
                     hole_height_range=(h_min, h_max),
                     hole_width_range=(h_min, h_max),
-                    fill=0,
+                    fill="random",
                     p=a.erase.prob,
                 )
             except TypeError:
@@ -139,7 +187,7 @@ class DualTowerTransforms:
                     max_width=h_max,
                     min_height=h_min,
                     min_width=h_min,
-                    fill_value=0,
+                    fill_value="random",
                     p=a.erase.prob,
                 )
             ops.append(erase_op)
@@ -149,11 +197,11 @@ class DualTowerTransforms:
         return A.Compose(ops)
 
     def _build_val(self):
-        ops = [self._common_resize(train=False)]
-        if self.aug.crop.enabled:
-            ops.append(A.CenterCrop(height=self.aug.crop.size, width=self.aug.crop.size))
-        ops.append(self._normalize())
-        ops.append(ToTensorV2())
+        ops = [
+            self._common_resize(train=False),
+            self._normalize(),
+            ToTensorV2(),
+        ]
         return A.Compose(ops)
 
     def _normalize(self):

@@ -373,20 +373,44 @@ class DatasetSplitter:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _worker_process_chunk(chunk_records, synthesizer, taxonomy, num_captions):
+def _worker_process_chunk(chunk_records: List[Tuple[str, int, str]], synthesizer: CaptionSynthesizer, taxonomy: TaxonomyClasses, num_captions: int) -> List[Tuple[str, str, List[str], bool]]:
     """并发生成 Captions"""
     results = []
     for img_name, class_id, base_alias in chunk_records:
-        if class_id == -1 or base_alias.lower() == "negative":
-            actual_alias = NegativeAliasExtractor.extract_from_filename(img_name)
-            is_neg = True
-        else:
-            actual_alias = base_alias
-            is_neg = False
+        base_clean = base_alias.strip().lower()
 
+        # 显式 nonobject
+        if base_clean == "nonobject":
+            results.append((img_name, "nonobject", [""], True))
+            continue
+
+        # 若为 class_id == -1 或 negative，尝试从文件名提取name
+        if class_id == -1 or base_clean == "negative":
+            cand_alias = NegativeAliasExtractor.extract_from_filename(img_name)
+            if cand_alias == "nonobject":
+                results.append((img_name, "nonobject", [""], True))
+                continue
+            
+            latin = taxonomy.get_latin(cand_alias)
+            if latin is not None:
+                actual_alias = cand_alias
+                captions = synthesizer.generate(actual_alias, latin, num_captions=num_captions)
+                results.append((img_name, actual_alias, captions, True))
+            else:
+                # 纯背景 negative 赋空
+                results.append((img_name, "negative", [""], True))
+            continue
+
+        # 常规类别
+        actual_alias = base_alias.strip()
         latin = taxonomy.get_latin(actual_alias)
-        captions = synthesizer.generate(actual_alias, latin, num_captions=num_captions)
-        results.append((img_name, actual_alias, captions, is_neg))
+        if latin is not None:
+            captions = synthesizer.generate(actual_alias, latin, num_captions=num_captions)
+            is_neg = not taxonomy.is_pos(actual_alias)
+            results.append((img_name, actual_alias, captions, is_neg))
+        else:
+            # 兜底：若 class_map 中混入了不在 taxonomy.csv 里的未知虫名，归为 nonobject
+            results.append((img_name, "nonobject", [""], True))
     return results
 
 
@@ -398,7 +422,7 @@ class DatasetPipeline:
         self.img_root = Path(args.img_root)
         self.out_dir = Path(args.out_dir)
 
-        self.taxonomy = TaxonomyClasses.from_csv(args.taxonomy_csv)
+        self.taxonomy = TaxonomyClasses.from_csv(args.taxonomy_csv, anchors_yaml=args.anchors_yaml)
         self.base_loader = BaseDatasetLoader(args.dataset_csv, args.class_map_json)
         self.kb_loader = KnowledgeBaseLoader(args.caption_jsons)
 
@@ -462,7 +486,7 @@ class DatasetPipeline:
         neg_count = 0
 
         for img_name, actual_alias, captions, is_neg in tqdm(processed_results, desc="[Resolving Images]"):
-            candidate_dirs = [actual_alias, "negative"] if is_neg else [actual_alias]
+            candidate_dirs = [actual_alias, "negative", "nonobject"] if is_neg else [actual_alias]
             img_file = self._locate_image(candidate_dirs, img_name)
 
             if img_file is None:

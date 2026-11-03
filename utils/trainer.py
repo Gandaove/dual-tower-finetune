@@ -56,7 +56,9 @@ class Trainer:
         self.steps_per_epoch = len(self.dm.train_dataloader())
         if self.steps_per_epoch <= 0:
             raise ValueError("解析训练 DataLoader 长度为 0，请检查数据划分与 batch_size 配置。")
+        
         self.model._steps_per_epoch = self.steps_per_epoch
+        self.model.loss_fn.set_positive_alias(self.dm.taxonomy.pos_cnames)
 
         if cfg.train.ckpt_path and Path(cfg.train.ckpt_path).is_file():
             _log.info(f"[Trainer] 读取预训练/断点权重: {cfg.train.ckpt_path}")
@@ -136,7 +138,11 @@ class Trainer:
 
     def _current_lr(self) -> float:
         if self.model and self.model._optimizer:
-            return max(float(pg["lr"]) for pg in self.model._optimizer.param_groups)
+            pgs = self.model._optimizer.param_groups
+            trunk_lrs = [float(pg["lr"]) for pg in pgs if pg.get("group_type") != "head"]
+            if trunk_lrs:
+                return max(trunk_lrs)
+            return max(float(pg["lr"]) for pg in pgs)
         return 0.0
 
     def _train_loss_avg(self) -> float:

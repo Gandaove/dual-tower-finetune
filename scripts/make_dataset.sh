@@ -5,13 +5,13 @@ python -m dataset.make_dataset \
     --taxonomy_csv /home/syk/pest_cls_dataset/captions/taxonomy.csv \
     --caption_jsons /home/syk/pest_cls_dataset/captions/pest-corpus-build.json \
     --anchors_yaml /home/syk/pest_cls_dataset/captions/anchors.yaml \
-    --out_dir /home/syk/pest_cls_dataset/captions/v4 \
+    --out_dir /home/syk/pest_cls_dataset/captions/v5 \
     --prompt_prefix "A photo of" \
     --ratios 0.7 0.3 0 \
     --num_captions 3 \
     --diagnostic_prob 0.3 \
+    --make_lmdb \
+    --lmdb_out /home/syk/pest_cls_dataset/captions/multimodal.lmdb \
     --min_dims 1 \
     --max_dims 3 \
-    --seed 1891898456
-    # --make_lmdb \
-    # --lmdb_out /home/syk/pest_cls_dataset/captions/multimodal.lmdb \
+    --seed 34144532

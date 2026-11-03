@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule
-from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoProcessor, AutoTokenizer, BitsAndBytesConfig
 
 from models.loss import build_loss
 from models.optimizer import build_optimizer, build_scheduler
@@ -29,10 +29,13 @@ def _list_to_tensor(obj: Any) -> torch.Tensor:
 
 def _build_peft_config(cfg: LoraSettingConfig, targets: List[str]):
     t = getattr(cfg, "type", "lora").lower()
+    is_qlora = cfg.qlora
+    if is_qlora and t not in ("lora", "dora"):
+        raise ValueError(f"QLoRA (4-bit) 仅支持 'lora' 或 'dora'，当前配置为: {t}")
     if t in ("lora", "dora"):
         return peft.LoraConfig(
             r=cfg.r, lora_alpha=cfg.alpha, lora_dropout=cfg.dropout,
-            bias=cfg.bias, target_modules=targets, use_dora=(t == "dora"),
+            bias=cfg.bias, target_modules=targets, use_dora=(t == "dora"), use_rslora=cfg.use_rslora
         )
     cls_map = {"loha": peft.LoHaConfig, "lokr": peft.LoKrConfig}
     if t in cls_map:
@@ -60,11 +63,15 @@ class BaseDualTowerModel(LightningModule, ABC):
         if model_cfg.compile and model_cfg.use_lora:
             raise ValueError("配置冲突: compile=True 与 use_lora=True 无法同时开启。")
 
+        self._is_kbit = bool(model_cfg.use_lora and model_cfg.lora.qlora)
         self.model, self.processor = self._build_backbone()
 
         self.customize_text_length(self.max_text_length)
 
         self._configure_freezing()
+        if model_cfg.gradient_checkpointing:
+            self._enable_gradient_checkpointing()
+
         self._apply_dropout_trunk(self.model, model_cfg.dropout)
         if model_cfg.compile:
             self._setup_compile()
@@ -88,6 +95,16 @@ class BaseDualTowerModel(LightningModule, ABC):
         """根据微调模式动态派生保存文件名后缀"""
         return "-lora" if self.model_cfg.use_lora else ""
 
+    def to(self, *args, **kwargs):
+        '''重写防止强转4-bit时报错'''
+        if self._is_kbit:
+            # 仅对其余非 4-bit 模块（如 loss_fn、自定义 head 等）执行显式迁移
+            for name, child in self.named_children():
+                if name != "model":
+                    child.to(*args, **kwargs)
+            return self
+        return super().to(*args, **kwargs)
+    
     @abstractmethod
     def get_vision_tower(self) -> nn.Module:
         pass
@@ -144,6 +161,30 @@ class BaseDualTowerModel(LightningModule, ABC):
     def _update_text_config_length(self, target_len: int):
         """同步更新具体模型内部 config 中的长度定义"""
         pass
+
+    def _enable_gradient_checkpointing(self):
+        if self.arch == "tipsv2":
+            self._enable_tipsv2_block_checkpointing()
+            return
+        gc_kwargs = {"use_reentrant": False}
+        try:
+            self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gc_kwargs)
+            _log.info(f"[{self.arch.upper()}] 主干已通过 HuggingFace 原生 API 激活 Gradient Checkpointing")
+        except TypeError:
+            self.model.gradient_checkpointing_enable()
+            _log.info(f"[{self.arch.upper()}] 主干已激活 Gradient Checkpointing (默认参数)")
+
+    def _get_quantization_config(self) -> Optional[BitsAndBytesConfig]:
+        if not self._is_kbit:
+            return None
+        compute_dtype = torch.bfloat16 if self.model_cfg.amp == "bf16" else torch.float16
+        _log.info(f"[{self.arch.upper()}] 启用 4-bit NormalFloat (NF4) 量化底座构建 QLoRA...")
+        return BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=True,
+        )
 
     @staticmethod
     def _interpolate_weight(weight_tensor: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -246,11 +287,25 @@ class BaseDualTowerModel(LightningModule, ABC):
                     "或将 freeze_mode 设置为 'text' / 'both' 以确保文本端冻结。"
                 )
 
-        if fm in ("both", "vision") and vt: vt.requires_grad_(False)
-        elif vt: vt.requires_grad_(True)
+        # 针对 QLoRA 的特殊预处理
+        if self._is_kbit:
+            peft_gc = self.model_cfg.gradient_checkpointing and (self.arch != "tipsv2")
+            self.model = peft.prepare_model_for_kbit_training(
+                self.model,
+                use_gradient_checkpointing=peft_gc,
+                gradient_checkpointing_kwargs={"use_reentrant": False} if peft_gc else None
+            )
+            vt, tt = self.vision_tower, self.text_tower
+        else:
+            if self.model_cfg.gradient_checkpointing:
+                if hasattr(self.model, "enable_input_require_grads"):
+                    self.model.enable_input_require_grads()
 
-        if fm in ("both", "text") and tt: tt.requires_grad_(False)
-        elif tt: tt.requires_grad_(True)
+            if fm in ("both", "vision") and vt: vt.requires_grad_(False)
+            elif vt: vt.requires_grad_(True)
+
+            if fm in ("both", "text") and tt: tt.requires_grad_(False)
+            elif tt: tt.requires_grad_(True)
 
         if use_lora:
             if "vision" in lora.apply_to and vt:
@@ -376,12 +431,18 @@ class BaseDualTowerModel(LightningModule, ABC):
             n_t_blocks=n_t_blocks
         )
         self._optimizer, self._opt_extra = opt, extra
+        if self.trainer and self.trainer.estimated_stepping_batches:
+            total_opt_steps = int(self.trainer.estimated_stepping_batches)
+            eff_steps_per_epoch = max(1, total_opt_steps // max(1, self.train_cfg.epochs))
+        else:
+            eff_steps_per_epoch = max(1, getattr(self, "_steps_per_epoch", 2000) // max(1, self.train_cfg.accumulate))
+
         sched, interval = build_scheduler(
             opt, 
             self.model_cfg, 
             self.train_cfg.epochs, 
-            getattr(self, "_steps_per_epoch", 2000), 
-            accumulate=self.train_cfg.accumulate,
+            steps_per_epoch=eff_steps_per_epoch,
+            accumulate=1,
             interval=self.model_cfg.scheduler.interval
         )
         self._scheduler, self._sched_interval = sched, interval
@@ -407,7 +468,9 @@ class BaseDualTowerModel(LightningModule, ABC):
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
-        self.update_ema()
+        accum = getattr(self.trainer, "accumulate_grad_batches", 1)
+        if (batch_idx + 1) % accum == 0 or (batch_idx + 1) == getattr(self, "_steps_per_epoch", 0):
+            self.update_ema()
 
     def pack_checkpoint(self, epoch: int, metric: float, save_optimizer: bool, train_config: dict):
         """区分仅保存 LoRA 可训参数 / 全量模型"""
@@ -534,7 +597,14 @@ class Siglip(BaseDualTowerModel):
         return len(vt.encoder.layers), len(tt.encoder.layers)
 
     def _build_backbone(self):
-        m = AutoModel.from_pretrained(self.model_cfg.pretrained_path, trust_remote_code=self.model_cfg.trust_remote_code)
+        q_cfg = self._get_quantization_config()
+        device_map = {"": torch.cuda.current_device()} if (q_cfg and torch.cuda.is_available()) else None
+        m = AutoModel.from_pretrained(
+            self.model_cfg.pretrained_path, 
+            trust_remote_code=self.model_cfg.trust_remote_code,
+            device_map=device_map, 
+            quantization_config=q_cfg
+        )
         try: p = AutoProcessor.from_pretrained(self.model_cfg.pretrained_path, trust_remote_code=self.model_cfg.trust_remote_code)
         except Exception: p = AutoTokenizer.from_pretrained(self.model_cfg.pretrained_path, trust_remote_code=self.model_cfg.trust_remote_code)
         return m, p
@@ -580,7 +650,14 @@ class TIPsv2(BaseDualTowerModel):
         return len(vt.blocks), len(tt.transformer.resblocks)
 
     def _build_backbone(self):
-        m = AutoModel.from_pretrained(self.model_cfg.pretrained_path, trust_remote_code=True)
+        q_cfg = self._get_quantization_config()
+        device_map = {"": torch.cuda.current_device()} if (q_cfg and torch.cuda.is_available()) else None
+        m = AutoModel.from_pretrained(
+            self.model_cfg.pretrained_path,
+            trust_remote_code=True,
+            quantization_config=q_cfg,
+            device_map=device_map,
+        )
         try: p = AutoProcessor.from_pretrained(self.model_cfg.pretrained_path, trust_remote_code=True)
         except Exception: p = AutoTokenizer.from_pretrained(self.model_cfg.pretrained_path, trust_remote_code=True)
         return m, p
@@ -612,6 +689,48 @@ class TIPsv2(BaseDualTowerModel):
             padding_mask = 1.0 - text_inputs["attention_mask"].float()
         out = tt(input_ids, padding_mask)
         return out, None
+
+    def _enable_tipsv2_block_checkpointing(self):
+        """针对 TIPSv2 非标双塔的纯原生算子级重算注入"""
+        def _make_inputs_require_grad(module, input, output):
+            if isinstance(output, torch.Tensor):
+                output.requires_grad_(True)
+            elif isinstance(output, (tuple, list)) and len(output) > 0 and isinstance(output[0], torch.Tensor):
+                output[0].requires_grad_(True)
+
+        def _wrap_block_forward(block: nn.Module):
+            old_forward = block.forward
+            def custom_forward(*args, **kwargs):
+                # 仅在训练阶段激活重算，验证/推理阶段无感直通
+                if block.training:
+                    return torch.utils.checkpoint.checkpoint(
+                        old_forward, *args, use_reentrant=False, **kwargs
+                    )
+                return old_forward(*args, **kwargs)
+
+            block.forward = custom_forward
+
+        # 视觉塔劫持: vision_encoder.blocks
+        vt = getattr(self.model, "vision_encoder", None)
+        if vt is not None:
+            # 确保输入 patch 具有梯度，防止 autograd 链在冻结主干处中断
+            if hasattr(vt, "patch_embed"):
+                vt.patch_embed.register_forward_hook(_make_inputs_require_grad)
+            if hasattr(vt, "blocks"):
+                for block in vt.blocks:
+                    _wrap_block_forward(block)
+                _log.info(f"[TIPSV2] 视觉塔成功注入原生 Block 级重算 ({len(vt.blocks)} 层)")
+
+        # 文本塔劫持: text_encoder.transformer.resblocks
+        tt = getattr(self.model, "text_encoder", None)
+        if tt is not None:
+            if hasattr(tt, "token_embedding"):
+                tt.token_embedding.register_forward_hook(_make_inputs_require_grad)
+            resblocks = getattr(getattr(tt, "transformer", None), "resblocks", None)
+            if resblocks is not None:
+                for block in resblocks:
+                    _wrap_block_forward(block)
+                _log.info(f"[TIPSV2] 文本塔成功注入原生 Block 级重算 ({len(resblocks)} 层)")
 
 
 class FGClip(BaseDualTowerModel):
@@ -652,10 +771,14 @@ class FGClip(BaseDualTowerModel):
         self._update_text_config_length(target_length)
 
     def _build_backbone(self):
+        q_cfg = self._get_quantization_config()
+        device_map = {"": torch.cuda.current_device()} if (q_cfg and torch.cuda.is_available()) else None
         m = AutoModelForCausalLM.from_pretrained(
             self.model_cfg.pretrained_path,
             trust_remote_code=True,
             low_cpu_mem_usage=False,
+            quantization_config=q_cfg,
+            device_map=device_map,
         )
         self._patch_text_embeddings(m)
         p = AutoProcessor.from_pretrained(self.model_cfg.pretrained_path, trust_remote_code=True)
@@ -687,11 +810,12 @@ class FGClip(BaseDualTowerModel):
         keep_len = getattr(cfg, "keep_len", 64)
 
         emb = self.raw_text_tower.embeddings
-        mask1 = torch.zeros([target_len, 1], dtype=torch.float32)
-        mask2 = torch.zeros([target_len, 1], dtype=torch.float32)
+        target_device = emb.token_embedding.weight.device
+        mask1 = torch.zeros([target_len, 1], dtype=torch.float32, device=target_device)
+        mask2 = torch.zeros([target_len, 1], dtype=torch.float32, device=target_device)
         mask1[:keep_len, :] = 1.0
         mask2[keep_len:, :] = 1.0
-        pos = torch.arange(target_len, dtype=torch.long).unsqueeze(0)
+        pos = torch.arange(target_len, dtype=torch.long, device=target_device).unsqueeze(0)
 
         for name, tensor in (("mask1", mask1), ("mask2", mask2), ("position_ids", pos)):
             if hasattr(emb, name):
@@ -706,7 +830,8 @@ class FGClip(BaseDualTowerModel):
         cfg = getattr(model.config, "text_config", model.config)
         l_len, k_len = getattr(cfg, "longtext_len", 196), getattr(cfg, "keep_len", 64)
 
-        m1, m2 = torch.zeros([l_len, 1], dtype=torch.float32), torch.zeros([l_len, 1], dtype=torch.float32)
+        target_device = emb.token_embedding.weight.device
+        m1, m2 = torch.zeros([l_len, 1], dtype=torch.float32, device=target_device), torch.zeros([l_len, 1], dtype=torch.float32, device=target_device)
         m1[:k_len, :] = 1.0
         m2[k_len:, :] = 1.0
         pos = torch.arange(l_len, dtype=torch.long).unsqueeze(0)

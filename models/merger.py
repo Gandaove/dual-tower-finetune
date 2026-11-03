@@ -85,6 +85,9 @@ def merge_lora_weights(cfg: MergeConfig) -> Path:
     with open(data_json, "r", encoding="utf-8") as f:
         data_cfg = DataConfig.from_dict(json.load(f))
 
+    model_cfg.lora.qlora = False
+    model_cfg.gradient_checkpointing = False
+    
     target = Path(cfg.output_path)
     if target.suffix.lower() == ".safetensors":
         export_file = target

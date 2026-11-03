@@ -488,8 +488,8 @@ class DualTowerExporter:
             if isinstance(mod, peft.PeftModel):
                 raise RuntimeError("模型中存在未解耦的 PeftModel 实例，请检查权重完整性。")
 
-        model.eval()
         ModelPatcherRegistry.patch(self.model_cfg.arch, model, img_size=self.img_size)
+        model.eval()
         return model
 
     def _resolve_candidate_texts(self) -> List[str]:
@@ -501,7 +501,7 @@ class DualTowerExporter:
             if not csv_path.is_file():
                 raise FileNotFoundError(f"未找到物种映射表 class_map_csv: {csv_path}")
 
-            taxonomy = TaxonomyClasses.from_csv(csv_path)
+            taxonomy = TaxonomyClasses.from_csv(csv_path, anchors_yaml=self.data_cfg.anchors_yaml)
             tmpl = self.model_cfg.eval.prompt_template or "A photo of a {latin}, belonging to family {family}, order {order}."
             return taxonomy.format_prompts(tmpl)
 

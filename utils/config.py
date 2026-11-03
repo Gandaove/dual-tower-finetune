@@ -51,8 +51,10 @@ class SchedulerConfig:
 @dataclass
 class LoRAConfig:
     type: str = "dora"
+    qlora: bool = False
     r: int = 16
     alpha: int = 32
+    use_rslora: bool = False
     dropout: float = 0.05
     bias: str = "none"                           # ["none","all","lora_only"]
     apply_to: List[str] = field(default_factory=lambda: ["vision"])
@@ -97,6 +99,7 @@ class ModelConfig:
     grad_clip: Optional[float] = 1.0
     label_smoothing: float = 0.0
     compile: bool = False
+    gradient_checkpointing: bool = False
     loss: LossConfig = field(default_factory=LossConfig)
     use_lora: bool = True
     lora: LoRAConfig = field(default_factory=LoRAConfig)
@@ -118,8 +121,10 @@ class AugResize:
 @dataclass
 class AugCrop:
     enabled: bool = False
-    method: str = "center"
-    size: int = 256
+    method: str = "hybrid"                  # ["random", "center", "directional", "hybrid"]
+    scale: List[float] = field(default_factory=lambda: [0.72, 0.95])
+    directional_prob: float = 0.5
+    prob: float = 0.5
 
 
 @dataclass
@@ -310,6 +315,7 @@ class DataConfig:
     train: str = "captions/train_captions.json"
     val: str = "captions/val_captions.json"
     class_map_csv: str = "captions/pest_filted.csv"
+    anchors_yaml: str = "captions/anchors.yaml"
     caption_sample: str = "random"
     val_caption_sample: str = "first"
     augment: AugmentConfig = field(default_factory=AugmentConfig)

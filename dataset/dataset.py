@@ -353,7 +353,7 @@ class DualTowerDataModule(LightningDataModule):
         csv_path = Path(self.cfg.class_map_csv)
         if not csv_path.is_absolute():
             csv_path = self.root / csv_path
-        self.taxonomy = TaxonomyClasses.from_csv(csv_path)
+        self.taxonomy = TaxonomyClasses.from_csv(csv_path, anchors_yaml=self.cfg.anchors_yaml)
         self.classes = self.taxonomy.cnames
 
         # 路由挂载数据集

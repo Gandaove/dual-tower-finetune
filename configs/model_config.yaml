@@ -5,17 +5,17 @@
 # 运行期参数(batch_size/epochs/freeze_mode...)由 CLI 传入。
 # ============================================================
 
-arch: tipsv2                                              # ["siglip2", "tipsv2", "fgclip2"]
-pretrained_path: "./huggingface_models/tipsv2-b14"
+arch: fgclip2                                              # ["siglip2", "tipsv2", "fgclip2"]
+# pretrained_path: "./huggingface_models/tipsv2-b14"
 # pretrained_path: "./huggingface_models/siglip2-base-256"
-# pretrained_path: "./huggingface_models/fg-clip2-base"
+pretrained_path: "./huggingface_models/fg-clip2-base"
 trust_remote_code: true                                  # [siglip: t/f; tipsv2/fgclip2: t]
 
-max_text_length: 192                                     # [64, {...}, 196]
+max_text_length: 196                                     # [64, {...}, 196]
 text_padding: max_length                                 # [max_length, longest, false]
 
 # ------------------------- 优化器 ---------------------------
-lr: 0.0001                                                 # 峰值学习率(warmup 结束后的起点)
+lr: 0.00006                                                 # 峰值学习率(warmup 结束后的起点)
 min_lr: 0.00000001                                          # 余弦/线性退火的下界
 optimizer:
   enable: AdamW                                              # ["AdamW", "MuSGD"]
@@ -35,8 +35,8 @@ optimizer:
 # ------------------------- 调度器 ---------------------------
 scheduler:
   enable: cosine                                             # ["linear", "cosine", "onecycle", "multistep"]
-  warmup_epochs: 8                                          
-  warmup_start_factor: 0.08                                  # warmup 起始 lr = lr * factor
+  warmup_epochs: 5                                          
+  warmup_start_factor: 0.1                                  # warmup 起始 lr = lr * factor
   interval: step                                             # ["step", "epoch"] 调度粒度
   multistep:
     milestones: [10, 20]                                     # 单位: epoch
@@ -53,6 +53,7 @@ ema: 0.999                                                      # 指数滑动�
 grad_clip: 3.0                                               # 梯度裁剪范数; null 关闭
 label_smoothing: 0.02                                         # 仅对 InfoNCE 类损失生效
 compile: false                                               # torch.compile 加速开关
+gradient_checkpointing: true                                 # 节省显存
 
 # ------------------------- 损失 -----------------------------
 loss:
@@ -68,14 +69,16 @@ loss:
 use_lora: true
 lora:
   type: "dora"                                               # ["lora", "dora", "loha", "lokr"]
-  r: 64
-  alpha: 128
-  dropout: 0.1
+  qlora: false
+  use_rslora: true
+  r: 32
+  alpha: 64     
+  dropout: 0.2
   bias: lora_only                                                 # ["none", "all", "lora_only"]
   apply_to: ["vision", "text"]                                       # 注入哪些塔: vision / text
   target_modules:
-    ["qkv", "attn.proj", "fc1", "fc2", "out_proj", "c_fc", "c_proj"]    # tipsv2
-    # ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2]
+    # ["qkv", "attn.proj", "fc1", "fc2", "out_proj", "c_fc", "c_proj"]    # tipsv2
+    ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2]
 
 # ------------------------- 验证/评估 ------------------------
 eval:

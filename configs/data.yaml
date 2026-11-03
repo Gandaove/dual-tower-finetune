@@ -4,29 +4,31 @@
 
 root: /home/syk/pest_cls_dataset            # 数据集根目录
 images: captions/multimodal.lmdb                       
-train: captions/v4/train.json         # 相对 root
-val: captions/v4/valid.json
+train: captions/v5/train.json         # 相对 root
+val: captions/v5/valid.json
 class_map_csv: captions/taxonomy.csv         # 包含[pest_name, alias, pest_latin_name]
 
 caption_sample: random                      # caption 采样策略: ["random", "first", "concat"]
 val_caption_sample: first                   # 验证集固定取首条, 保证指标可复现
 
-confusion_json: outputs/fgclip2-20260929/valid1/confusion_intensity.json         # 混淆强度json
+confusion_json: outputs/siglip2-20261017/valid1/confusion_intensity.json         # 混淆强度json
 hard_prob: 0.4
 anchors_yaml: /home/syk/pest_cls_dataset/captions/anchors.yaml
 
 augment:
   enabled: true
-  close_augment_epoch: 30                  # 该 epoch 起关闭增强(仅保留 resize/normalize)
+  close_augment_epoch: 35                  # 该 epoch 起关闭增强(仅保留 resize/normalize)
   resize:
     method: "letterbox"                     # ["shortest_edge", "letterbox", "direct"]
-    size: 448                               # tipsv2: 448 / siglip2: 224
+    size: 224                               # tipsv2: 448 / siglip2: 224
     interp: "bilinear"                      # ["bilinear", "bicubic", "nearest"]
     pad_value: 114                          # letterbox 填充灰度
   crop:
-    enabled: false
-    method: "center"                        # ["center", "random"]
-    size: 224
+    enabled: true
+    method: "hybrid"                        # ["random", "center", "directional", "hybrid"]
+    scale: [0.78, 0.98]                     # 相对原图宽高的裁剪保留比例区间
+    directional_prob: 0.5                   # 在 hybrid 模式下，抽中"单边/定向整刀裁切"的条件概率
+    prob: 0.25                               # 触发概率 (建议 0.4 ~ 0.5)
   flip: 0.5                                 # 水平/垂直翻转概率
   vflip: 0.5                                # 单独控制垂直翻转; >0 时覆盖 flip 的垂直分量
   rotate:
@@ -46,13 +48,13 @@ augment:
     v: 0.4
     prob: 0.3
   gauss_blur:
-    blur: [3, 5]
+    blur: [3, 7]
     sigma: [0.3, 1]
-    prob: 0.2
+    prob: 0.3
   erase:
     prob: 0.4
     range: [0.01, 0.04]
     max_holes: 4
   normalize:
-    mean: [0, 0, 0]         # tipsv2: 0 / siglip2: 0.5
-    std: [1, 1, 1]          # tipsv2: 1 / siglip2: 0.5
+    mean: [0.5, 0.5, 0.5]         # tipsv2: 0 / siglip2: 0.5
+    std: [0.5, 0.5, 0.5]          # tipsv2: 1 / siglip2: 0.5

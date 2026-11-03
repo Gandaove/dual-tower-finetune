@@ -50,6 +50,7 @@ def is_decay_excluded(name: str) -> bool:
         or "logit_bias" in name
         or "position_embedding" in name_lower
         or "pos_embedder" in name_lower
+        or "lora_magnitude_vector" in name_lower
     )
 
 
@@ -118,6 +119,7 @@ def group_parameters(
         # 1. 优先匹配各类头算子与 Logit 标量
         if _is_head_param(clean_name):
             lr = base_lr * head_lr_scale
+            g_type = "head"
 
         # 2. LoRA 增量参数保持 base_lr，不参与主干深度衰减
         elif (
@@ -126,6 +128,7 @@ def group_parameters(
             or "pos_embedder" in clean_name
         ):
             lr = base_lr
+            g_type = "trunk"
 
         # 3. 主干 Trunk 按模型所属塔拆分，独立执行 LLRD
         elif use_llrd:
@@ -137,8 +140,10 @@ def group_parameters(
                 lr = base_lr * (layer_decay ** (n_t_blocks - 1 - depth))
             else:
                 lr = base_lr
+            g_type = "trunk"
         else:
             lr = base_lr
+            g_type = "trunk"
 
         key = (round(lr, 12), round(decay, 8))
         buckets.setdefault(key, []).append(p)
@@ -149,6 +154,7 @@ def group_parameters(
             "params": params,
             "lr": lr,
             "weight_decay": decay,
+            "group_type": g_type,
         })
     return param_groups
 
@@ -281,6 +287,9 @@ class WarmupLRScheduler(LRScheduler):
                 step / max(1, self.warmup_steps)
             )
             return [base * factor for base in self.base_lrs]
+
+        if step == self.warmup_steps:
+            return list(self.base_lrs)
 
         progress = (step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
         progress = min(1.0, max(0.0, progress))

@@ -34,6 +34,7 @@ class SiglipSigmoidLoss(nn.Module):
         self.learnable = learnable_logit
         self.cfg_scale = init_scale
         self.cfg_bias = init_bias
+        self.pos_set = None
 
         default_log_scale = math.log(10.0)
         default_bias = -10.0
@@ -51,6 +52,9 @@ class SiglipSigmoidLoss(nn.Module):
 
         self.max_scale = math.log(max_scale)
         self.label_constrain = label_constrain
+
+    def set_positive_alias(self, positive_alias_list):
+        self.pos_set = set(positive_alias_list)
 
     def sync_from_model_params(self, model: nn.Module):
         '''从权重同步logit_scale, logit_bias'''
@@ -73,12 +77,36 @@ class SiglipSigmoidLoss(nn.Module):
         b = logits.size(0)
         if labels is not None and self.label_constrain:
             lbl_arr = np.array(labels)
-            target_matrix = torch.from_numpy(lbl_arr[:, None] == lbl_arr[None, :]).to(
-                device=logits.device, dtype=logits.dtype
-            )
+            target_matrix = (lbl_arr[:, None] == lbl_arr[None, :])
+
+            is_neg_bg = (lbl_arr == "negative")
+            is_nonobj = (lbl_arr == "nonobject")
+            is_unpaired = is_neg_bg | is_nonobj
+
+            target_matrix[is_unpaired, :] = False
+            target_matrix[:, is_unpaired] = False
+            target_t = torch.tensor(target_matrix, device=logits.device, dtype=logits.dtype)
+
+            # 构造损失计算权重掩码 weight_mask [B, B]
+            weight_mask = torch.ones((b, b), device=logits.device, dtype=logits.dtype)
+
+            # 屏蔽所有 negative 和 nonobject 的 text 行
+            unpaired_t = torch.tensor(is_unpaired, device=logits.device, dtype=torch.bool)
+            weight_mask[:, unpaired_t] = 0.0
+
+            # 对于 nonobject 的 image 行：只排斥正类文本
+            if self.pos_set and is_nonobj.any():
+                is_named_neg_col = np.array([(lbl not in self.pos_set) and (lbl not in ("negative", "nonobject")) for lbl in lbl_arr])
+                if is_named_neg_col.any():
+                    nonobj_row_t = torch.tensor(is_nonobj, device=logits.device, dtype=torch.bool)
+                    named_neg_col_t = torch.tensor(is_named_neg_col, device=logits.device, dtype=torch.bool)
+                    weight_mask[nonobj_row_t[:, None] & named_neg_col_t[None, :]] = 0.0
+
+            loss_mat = F.binary_cross_entropy_with_logits(logits, target_t, reduction="none")
+            loss = (loss_mat * weight_mask).sum() / b
         else:
-            target_matrix = torch.eye(b, device=logits.device, dtype=logits.dtype)
-        loss = F.binary_cross_entropy_with_logits(logits, target_matrix, reduction="sum") / b
+            target_t = torch.eye(b, device=logits.device, dtype=logits.dtype)
+            loss = F.binary_cross_entropy_with_logits(logits, target_t, reduction="sum") / b
         return loss
 
 
@@ -157,6 +185,10 @@ class TIPsv2Loss(nn.Module):
             )
         else:
             raise ValueError(f"Not support {global_name} of TIPsv2 Loss choice!")
+
+    def set_positive_alias(self, positive_alias_list):
+        if isinstance(self.global_loss, SiglipSigmoidLoss):
+            self.global_loss.set_positive_alias(positive_alias_list)
 
     def forward(
         self,

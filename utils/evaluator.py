@@ -87,7 +87,7 @@ class Evaluator:
         prefix: str, 
         chunk_size: int = 256
     ) -> Dict[str, float]:
-        """分块计算 Top-K 召回率，显存与内存开销恒定，彻底弃用全局 argsort"""
+        """分块计算 Top-K 召回率，显存与内存开销恒定"""
         n = queries.size(0)
         ks = [k for k in self.eval_cfg.retrieval_topk if k <= n] or [1]
         max_k = max(ks)
@@ -157,10 +157,18 @@ class Evaluator:
                     y_true_list.extend([alias_to_idx.get(lbl, -1) for lbl in batch["label"]])       # 兼容负样本 -1
 
                 if collected_retrieval < self.max_retrieval_samples:
-                    remain = self.max_retrieval_samples - collected_retrieval
-                    retrieval_imgs.append(ie_norm[:remain].cpu())
-                    retrieval_txts.append(te_norm[:remain].cpu())
-                    collected_retrieval += min(len(images), remain)
+                    valid_mask = [
+                        lbl not in ("negative", "nonobject") and bool(txt.strip())
+                        for lbl, txt in zip( batch["label"], batch["text"] )
+                    ]
+                    if any(valid_mask):
+                        mask_t = torch.tensor(valid_mask, device=ie_norm.device, dtype=torch.bool)
+                        valid_ie = ie_norm[mask_t]
+                        valid_te = te_norm[mask_t]
+                        remain = self.max_retrieval_samples - collected_retrieval
+                        retrieval_imgs.append(valid_ie[:remain].cpu())
+                        retrieval_txts.append(valid_te[:remain].cpu())
+                        collected_retrieval += min(len(images), remain)
 
         self.y_true = y_true_list
         self.y_pred = y_pred_list
