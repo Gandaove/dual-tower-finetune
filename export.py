@@ -275,6 +275,21 @@ def patch_siglip(model: nn.Module, **_):
             _log.info(f"[Export Patch] 同步修正 SigLIP 文本位置索引 Buffer 长度至 {max_pos}")
 
 
+@ModelPatcherRegistry.register("bioclip2")
+def patch_bioclip2(model: nn.Module, **_):
+    m = getattr(model, "model", model)
+    text_model = getattr(m, "text_model", None)
+    if text_model is not None and hasattr(text_model, "embeddings"):
+        embed = text_model.embeddings
+        pos_embed = getattr(embed, "position_embedding", None)
+        if pos_embed is not None:
+            max_pos = pos_embed.weight.shape[0]
+            if not hasattr(embed, "position_ids") or embed.position_ids.shape[1] != max_pos:
+                new_pos_ids = torch.arange(max_pos, device=pos_embed.weight.device).unsqueeze(0)
+                embed.register_buffer("position_ids", new_pos_ids, persistent=False)
+                _log.info(f"[Export Patch] 同步修正 BioCLIP-2 文本位置索引 Buffer 长度至 {max_pos}")
+
+
 class BaseDeployWrapper(nn.Module):
     """部署封装基类"""
     @staticmethod

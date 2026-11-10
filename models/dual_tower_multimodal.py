@@ -867,10 +867,85 @@ class FGClip(BaseDualTowerModel):
         return pooler, getattr(out, "last_hidden_state", None)
 
 
+class BioClip2(BaseDualTowerModel):
+    def get_vision_tower(self) -> nn.Module: return self.model.vision_model
+    def set_vision_tower(self, module: nn.Module): self.model.vision_model = module
+    def get_text_tower(self) -> nn.Module: return self.model.text_model
+    def set_text_tower(self, module: nn.Module): self.model.text_model = module
+
+    def get_num_blocks(self) -> Tuple[int, int]:
+        vt = self._unwrap_peft(self.vision_tower)
+        tt = self._unwrap_peft(self.text_tower)
+        return len(vt.encoder.layers), len(tt.encoder.layers)
+
+    def _build_backbone(self):
+        q_cfg = self._get_quantization_config()
+        device_map = {"": torch.cuda.current_device()} if (q_cfg and torch.cuda.is_available()) else None
+        m = AutoModel.from_pretrained(
+            self.model_cfg.pretrained_path,
+            trust_remote_code=self.model_cfg.trust_remote_code,
+            device_map=device_map,
+            quantization_config=q_cfg,
+        )
+        if hasattr(m, "visual_projection"):
+            m.vision_model.head = m.visual_projection
+            delattr(m, "visual_projection")
+        if hasattr(m, "text_projection"):
+            m.text_model.head = m.text_projection
+            delattr(m, "text_projection")
+
+        p = AutoTokenizer.from_pretrained(self.model_cfg.pretrained_path, trust_remote_code=self.model_cfg.trust_remote_code)
+        # 内存态指定 pad_token_id = 0，避免修改 JSON 污染 BPE 特殊词元表
+        tok = getattr(p, "tokenizer", p)
+        tok.pad_token_id = 0
+        return m, p
+
+    @staticmethod
+    def _unwrap_peft(tower: nn.Module) -> nn.Module:
+        """规避 PreTrainedModel.base_model 同名属性冲突"""
+        if isinstance(tower, peft.PeftModel):
+            return tower.base_model.model
+        return getattr(tower, "_orig_mod", tower)
+
+    def get_default_text_length(self) -> int:
+        return getattr(self.model.config.text_config, "max_position_embeddings", 77)
+
+    def _get_token_embeddings(self) -> List[Union[nn.Module, nn.Parameter]]:
+        return [self.raw_text_tower.embeddings.token_embedding]
+
+    def _get_position_embeddings(self) -> List[Union[nn.Module, nn.Parameter]]:
+        return [self.raw_text_tower.embeddings.position_embedding]
+
+    def _update_text_config_length(self, target_len: int):
+        self.model.config.text_config.max_position_embeddings = target_len
+        emb = self.raw_text_tower.embeddings
+        emb.register_buffer(
+            "position_ids",
+            torch.arange(target_len, device=emb.position_embedding.weight.device).expand((1, -1)),
+            persistent=False,
+        )
+
+    def encode_vision(self, pixel_values: torch.Tensor):
+        vt = self.vision_tower if self.training else getattr(self.vision_tower, "_orig_mod", self.vision_tower)
+        raw_vt = self._unwrap_peft(vt)
+        out = vt(pixel_values=pixel_values)
+        feats = raw_vt.head(out.pooler_output)
+        return feats, getattr(out, "last_hidden_state", None)
+
+    def encode_text(self, text_inputs: Dict[str, torch.Tensor]):
+        tt = self.text_tower if self.training else getattr(self.text_tower, "_orig_mod", self.text_tower)
+        raw_tt = self._unwrap_peft(tt)
+        input_ids = text_inputs.get("input_ids", text_inputs.get("ids"))
+        out = tt(input_ids=input_ids, attention_mask=None)
+        feats = raw_tt.head(out.pooler_output)
+        return feats, getattr(out, "last_hidden_state", None)
+    
+
 _ARCH_MAP = {
     "siglip2": Siglip,
     "tipsv2": TIPsv2,
     "fgclip2": FGClip,
+    "bioclip2": BioClip2,
 }
 
 

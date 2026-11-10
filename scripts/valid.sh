@@ -5,8 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 python valid.py \
-    --ckpt_path    outputs/fgclip2-20261019/merged/fgclip2-20261019.safetensors \
-    --output_dir   outputs/fgclip2-20261019/valid1/ \
+    --ckpt_path    outputs/bioclip2-20261106/merged/bioclip2-20261109.safetensors \
+    --output_dir   outputs/bioclip2-20261106/valid1 \
     --num_workers 4 \
     --save_confusion_matrix
     "$@"

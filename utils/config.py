@@ -315,6 +315,8 @@ class DataConfig:
     train: str = "captions/train_captions.json"
     val: str = "captions/val_captions.json"
     class_map_csv: str = "captions/pest_filted.csv"
+    confusion_json: Optional[str] = None
+    hard_prob: float = 0.0
     anchors_yaml: str = "captions/anchors.yaml"
     caption_sample: str = "random"
     val_caption_sample: str = "first"

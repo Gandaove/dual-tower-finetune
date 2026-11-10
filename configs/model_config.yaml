@@ -5,25 +5,26 @@
 # 运行期参数(batch_size/epochs/freeze_mode...)由 CLI 传入。
 # ============================================================
 
-arch: fgclip2                                              # ["siglip2", "tipsv2", "fgclip2"]
+arch: bioclip2                                              # ["siglip2", "tipsv2", "fgclip2", "bioclip2"]
 # pretrained_path: "./huggingface_models/tipsv2-b14"
 # pretrained_path: "./huggingface_models/siglip2-base-256"
-pretrained_path: "./huggingface_models/fg-clip2-base"
+# pretrained_path: "./huggingface_models/fg-clip2-base"
+pretrained_path: "./huggingface_models/bioclip-2"
 trust_remote_code: true                                  # [siglip: t/f; tipsv2/fgclip2: t]
 
-max_text_length: 196                                     # [64, {...}, 196]
+max_text_length: 192                                     # [64, {...}, 196]
 text_padding: max_length                                 # [max_length, longest, false]
 
 # ------------------------- 优化器 ---------------------------
-lr: 0.00006                                                 # 峰值学习率(warmup 结束后的起点)
+lr: 0.00007                                                 # 峰值学习率(warmup 结束后的起点)
 min_lr: 0.00000001                                          # 余弦/线性退火的下界
 optimizer:
   enable: AdamW                                              # ["AdamW", "MuSGD"]
   weight_decay: 0.001
   betas: [0.9, 0.999]
   eps: 0.00000001
-  layer_decay: 0.72                                          # LLRD 逐层学习率衰减; null 或 1.0 关闭
-  head_lr_scale: 2.5                                        # logit_scale/logit_bias/投影头的 lr 放大倍数
+  layer_decay: 0.75                                          # LLRD 逐层学习率衰减; null 或 1.0 关闭
+  head_lr_scale: 2.0                                        # logit_scale/logit_bias/投影头的 lr 放大倍数
   musgd:                                                     # enable=MuSGD 时生效
     use_muon: true
     muon_weight: 0.5                                         # Muon(正交化)分支权重
@@ -60,8 +61,8 @@ loss:
   name: auto                                                 # ["auto","siglip","tipsv2","infonce"]; auto 跟随 arch
   tips_global: infonce                                       # ["infonce", "sigmoid"]
   learnable_logit: true                                      # logit_scale / logit_bias 是否可学习
-  max_scale: 200
-  label_constrain: true                                      # 启用 label 约束
+  max_scale: 100
+  label_constrain: false                                      # 启用 label 约束
   init_scale: auto                                           # ["auto", {float}]; auto 优先读取主干预训练权重
   init_bias: auto
 
@@ -78,7 +79,7 @@ lora:
   apply_to: ["vision", "text"]                                       # 注入哪些塔: vision / text
   target_modules:
     # ["qkv", "attn.proj", "fc1", "fc2", "out_proj", "c_fc", "c_proj"]    # tipsv2
-    ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2]
+    ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]        # [siglip2, fgclip2, bioclip2]
 
 # ------------------------- 验证/评估 ------------------------
 eval:

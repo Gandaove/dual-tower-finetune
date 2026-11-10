@@ -64,7 +64,7 @@ class Trainer:
             _log.info(f"[Trainer] 读取预训练/断点权重: {cfg.train.ckpt_path}")
             meta = self.model.load_safetensors(cfg.train.ckpt_path, load_opt=False)
             if cfg.train.resume:
-                self.start_epoch = int(meta.get("epochs", 0)) + 1
+                self.start_epoch = int(meta.get("epoch", 0)) + 1
                 try:
                     self.best_metric = float(meta.get("save_metric", self.best_metric))
                 except Exception:

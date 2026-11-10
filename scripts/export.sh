@@ -5,8 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 python export.py \
-    --ckpt_path outputs/fgclip2-20261031/merged/fgclip2-20261101.safetensors \
-    --output_dir tests/classifier \
+    --ckpt_path outputs/bioclip2-20261106/merged/bioclip2-20261109.safetensors \
+    --output_dir tests/bioclip2/ \
     --target_format engine \
     --precision bf16 \
     --max_batch_size 32 \

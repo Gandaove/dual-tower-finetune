@@ -33,7 +33,7 @@ def _unload_peft_towers(arch: str, model_core: nn.Module) -> None:
     根据具体架构显式提取双塔，执行 LoRA 融合并强制回填原生模型对象，
     彻底剥离 PeftModel 包装，确保 state_dict 键名恢复官方原生命名规范。
     """
-    if arch in ("siglip2", "fgclip2"):
+    if arch in ("siglip2", "fgclip2", "bioclip2"):
         if isinstance(model_core.vision_model, PeftModel):
             model_core.vision_model = model_core.vision_model.merge_and_unload()
         if isinstance(model_core.text_model, PeftModel):

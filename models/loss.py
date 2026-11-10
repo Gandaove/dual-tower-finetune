@@ -134,10 +134,13 @@ class InfoNCELoss(nn.Module):
         self.label_smoothing = label_smoothing
         self.max_scale = math.log(max_scale)
 
+    def set_positive_alias(self, positive_alias_list):
+        self.pos_set = set(positive_alias_list)
+
     def sync_from_model_params(self, model: nn.Module):
         '''从权重同步logit_scale'''
         with torch.no_grad():
-            if str(self.cfg_scale).lower() in ("auto", "none"):
+            if str(self.logit_scale).lower() in ("auto", "none"):
                 if hasattr(model, "logit_scale") and isinstance(model.logit_scale, (nn.Parameter, torch.Tensor)):
                     self.logit_scale.fill_(model.logit_scale.detach().cpu().item())
 
@@ -205,7 +208,12 @@ def build_loss(model_cfg) -> nn.Module:
     lc = model_cfg.loss
     name = lc.name
     if name == "auto":
-        name = "tipsv2" if model_cfg.arch == "tipsv2" else "siglip"
+        if model_cfg.arch == "tipsv2":
+            name = "tipsv2"
+        elif model_cfg.arch == "bioclip2":
+            name = "infonce"
+        else:
+            name = "siglip"
 
     if name == "siglip":
         return SiglipSigmoidLoss(

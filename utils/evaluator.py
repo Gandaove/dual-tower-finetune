@@ -168,7 +168,7 @@ class Evaluator:
                         remain = self.max_retrieval_samples - collected_retrieval
                         retrieval_imgs.append(valid_ie[:remain].cpu())
                         retrieval_txts.append(valid_te[:remain].cpu())
-                        collected_retrieval += min(len(images), remain)
+                        collected_retrieval += min(len(valid_ie), remain)
 
         self.y_true = y_true_list
         self.y_pred = y_pred_list
